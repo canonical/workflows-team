@@ -5,11 +5,12 @@ name: Terraform checks
 
 on:
   workflow_call:
-    module-directory:
-      description: "Directory where the terraform module is hosted in the repo"
-      default: "./terraform"
-      required: false
-      type: string
+    inputs:
+      module-directory:
+        description: "Directory where the terraform module is hosted in the repo"
+        default: "./terraform"
+        required: false
+        type: string
 
 jobs:
   format:
