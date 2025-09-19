@@ -1,0 +1,104 @@
+# Copyright 2025 Canonical Ltd.
+# See LICENSE file for licensing details.
+
+name: Terraform checks
+
+on:
+  workflow_call:
+    inputs:
+      module-directory:
+        description: "Directory where the terraform module is hosted in the repo"
+        default: "./terraform"
+        required: false
+        type: string
+      extra-snaps:
+        description: "Comma separated list of extra snaps to install for the apply job"
+        default: ""
+        required: false
+        type: string
+      install-docker:
+        description: "Flag to enable installation of docker after k8s is bootstraped"
+        default: false
+        required: false
+        type: boolean
+
+jobs:
+  format:
+    name: Terraform format
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.module-directory }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform and Just
+        run: |
+          sudo snap install terraform --classic
+          sudo snap install just --classic
+
+      - name: Run terraform format
+        run: |
+          just validate
+          just fmt
+
+  lint:
+    name: Terraform lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.module-directory }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          set +e
+          sudo snap install terraform --classic
+          sudo snap install tflint
+          sudo snap install just --classic
+
+      - name: Run tflint
+        run: just lint
+
+  apply:
+    name: Terraform apply
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.module-directory }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up operator environment
+        run: |
+          set -e
+
+          sudo apt-get purge $(dpkg -l | grep -i docker | awk '{print $2}')
+          sudo apt-get purge containerd.io
+          sudo rm -r /run/containerd
+
+          sudo snap install concierge --classic
+
+          sudo snap install terraform --classic
+          sudo snap install just --classic
+
+          sudo -E concierge prepare -p k8s
+
+        env:
+          CONCIERGE_EXTRA_SNAPS: ${{ inputs.extra-snaps }}
+
+      - name: Install docker if required (after k8s bootstrapped)
+        if: ${{ inputs.install-docker }}
+        run: |
+          sudo snap install docker
+          sudo snap start docker
+
+      - name: Run terraform apply
+        run: just test
