@@ -86,20 +86,18 @@ jobs:
 
           sudo snap install concierge --classic
 
-          sudo -E concierge prepare -p k8s
+          extra_snaps="terraform,just"
+          if [[ -n "${{ inputs.extra-snaps }}" ]]; then
+            extra_snaps="${extra_snaps},${{ inputs.extra-snaps }}"
+          fi
+
+          sudo -E concierge prepare -p k8s --extra-snaps="$extra_snaps"
 
           # Cannot use --extra-snaps with concierge because docker needs to be installed
           # after k8s is bootstrapped
           if [[ -n "${{ inputs.install-docker }}" ]]; then
             sudo snap install docker
           fi
-        env:
-          CONCIERGE_EXTRA_SNAPS: "terraform,just,${{ inputs.extra-snaps }}"
-
-            #      - name: Install dependencies
-            #        run: |
-            #          sudo snap install terraform --classic
-            #          sudo snap install just --classic
 
       - name: Run terraform apply
         run: just test
