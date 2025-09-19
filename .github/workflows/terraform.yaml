@@ -73,7 +73,7 @@ jobs:
 
       - name: Set up operator environment
         run: |
-          set +e
+          set -e
 
           sudo apt-get purge $(dpkg -l | grep -i docker | awk '{print $2}')
           sudo apt-get purge containerd.io
@@ -81,7 +81,7 @@ jobs:
 
           sudo snap install concierge --classic
 
-          sudo concierge prepare -p k8s
+          sudo -E concierge prepare -p k8s
         env:
           CONCIERGE_EXTRA_SNAPS: ${{ inputs.extra-snaps }}
 
