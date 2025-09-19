@@ -94,12 +94,12 @@ jobs:
             sudo snap install docker
           fi
         env:
-          CONCIERGE_EXTRA_SNAPS: ${{ inputs.extra-snaps }}
+          CONCIERGE_EXTRA_SNAPS: "terraform,just,${{ inputs.extra-snaps }}"
 
-      - name: Install dependencies
-        run: |
-          sudo snap install terraform --classic
-          sudo snap install just --classic
+            #      - name: Install dependencies
+            #        run: |
+            #          sudo snap install terraform --classic
+            #          sudo snap install just --classic
 
       - name: Run terraform apply
         run: just test
