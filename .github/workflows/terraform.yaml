@@ -11,6 +11,11 @@ on:
         default: "./terraform"
         required: false
         type: string
+      extra-snaps:
+        description: "Comma separated list of extra snaps to install for the apply job"
+        default: ""
+        required: false
+        type: string
 
 jobs:
   format:
@@ -23,8 +28,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.ref }}
 
       - name: Setup Terraform and Just
         run: |
@@ -77,9 +80,10 @@ jobs:
           sudo rm -r /run/containerd
 
           sudo snap install concierge --classic
-          sudo concierge prepare -p k8s
 
-          sudo snap install docker
+          sudo concierge prepare -p k8s
+        env:
+          CONCIERGE_EXTRA_SNAPS: ${{ inputs.extra-snaps }}
 
       - name: Install dependencies
         run: |
