@@ -17,7 +17,7 @@ on:
         required: false
         type: string
       install-docker:
-        descriptoin: "Flag to enable installation of docker after k8s is bootstraped"
+        description: "Flag to enable installation of docker after k8s is bootstraped"
         default: false
         required: false
         type: boolean
