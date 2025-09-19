@@ -97,6 +97,7 @@ jobs:
           # after k8s is bootstrapped
           if [[ -n "${{ inputs.install-docker }}" ]]; then
             sudo snap install docker
+            sudo snap start docker
           fi
 
       - name: Run terraform apply
