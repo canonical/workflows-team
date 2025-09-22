@@ -1,0 +1,37 @@
+## this file contains the workflow CI runner for SBOM and secscan
+
+name: SSDLC scanning
+
+on:
+    workflow_dispatch:
+    schedule:
+      - cron: "0 0 15 3,9 *"
+#              │ │ │  │    │
+#              │ │ │  │    └─ any day of the week.
+#              │ │ │  └────── 3rd and 9th month (March & September).
+#              │ │ └───────── 15th day of the month.
+#              │ └─────────── 0th hour of the day.
+#              └───────────── Start of the hour (minutes = 0).
+jobs:
+    scan:
+        runs-on: [self-hosted, self-hosted-linux-amd64-jammy-private-endpoint-medium]
+        strategy:
+          fail-fast: false
+          matrix:
+            artifact: [charm]
+
+        name: SSDLC scanning - all clients - ${{ matrix.artifact }} artifacts
+        steps:
+          - name: Checkout
+            uses: actions/checkout@v4
+          - name: Run sbomber action
+            uses: canonical/sbomber/.github/actions/run@main
+            with:
+              manifest: "${{ github.workspace }}/sbom_secscan_manifest.yaml"
+              artifact-name: ${{ matrix.artifact }}
+          - name: Notify team on scheduled failure
+            if: failure() && github.event_name == 'schedule'
+            uses: mattermost/action-mattermost-notify@master
+            with:
+              MATTERMOST_WEBHOOK_URL: $${{ secrets.MATTERMOST_WEBHOOK_URL }}
+              TEXT: SSDLC scheduled scan failed for `${{ matrix.artifact }}` in [$${{ github.repository }}]($${{ github.server_url }}/$${{ github.repository }}/actions/runs/$${{ github.run_id }})
