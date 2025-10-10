@@ -21,6 +21,11 @@ on:
         default: false
         required: false
         type: boolean
+      timeout-minutes:
+        description: "Timeout (in minutes) for the apply job"
+        default: 60
+        required: false
+        type: number
 
 jobs:
   format:
@@ -68,11 +73,11 @@ jobs:
   apply:
     name: Terraform apply
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: ${{ inputs.timeout-minutes }}
     defaults:
       run:
         working-directory: ${{ inputs.module-directory }}
-
+wh
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
