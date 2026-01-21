@@ -25,7 +25,7 @@ on:
 jobs:
   get-all-project-paths:
     name: Build filters from marker
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     outputs:
       filters: ${{ steps.find.outputs.filters }}
     steps:
@@ -54,7 +54,7 @@ jobs:
   project-dirs-with-changes:
     name: Filter changed projects
     needs: get-all-project-paths
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     permissions:
       pull-requests: read
     outputs:
