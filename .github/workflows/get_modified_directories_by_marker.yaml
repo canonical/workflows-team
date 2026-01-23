@@ -1,0 +1,70 @@
+name: Get modified by marker
+
+on:
+  workflow_call:
+    inputs:
+      base-ref:
+        description: Branch, tag, or commit SHA to compare against.
+        required: false
+        default: main
+        type: string
+      marker:
+        description: Marker file used to identify a project root (e.g. charmcraft.yaml, rockcraft.yaml).
+        required: true
+        type: string
+      search-root:
+        description: Directory to search within.
+        required: false
+        default: .
+        type: string
+    outputs:
+      paths:
+        description: List of project directories that changed.
+        value: ${{ jobs.project-dirs-with-changes.outputs.project_paths }}
+
+jobs:
+  get-all-project-paths:
+    name: Build filters from marker
+    runs-on: ubuntu-latest
+    outputs:
+      filters: ${{ steps.find.outputs.filters }}
+    steps:
+      - name: Checkout repository code
+        uses: actions/checkout@v4
+
+      - name: Generate dorny filters from marker file
+        id: find
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          root="${{ inputs.search-root }}"
+          marker="${{ inputs.marker }}"
+
+          filters=$(find "${root}" -name "${marker}" -printf "%h:\n  - '%h/**'\n" | sed 's|^\./||g')
+
+          if [ -z "${filters}" ]; then
+            filters="{}"
+          fi
+
+          echo "filters<<EOF" >> "$GITHUB_OUTPUT"
+          echo "${filters}" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+  project-dirs-with-changes:
+    name: Filter changed projects
+    needs: get-all-project-paths
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      project_paths: ${{ steps.filter.outputs.changes }}
+    steps:
+      - name: Checkout repository code
+        uses: actions/checkout@v4
+
+      - uses: dorny/paths-filter@v2
+        id: filter
+        with:
+          filters: ${{ needs.get-all-project-paths.outputs.filters }}
+          base: ${{ inputs.base-ref }}
