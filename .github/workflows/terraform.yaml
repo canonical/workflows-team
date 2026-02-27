@@ -97,6 +97,16 @@ jobs:
 
           sudo -E concierge prepare -p k8s
 
+          # FIXME: Install via goss snap whenever available
+          goss_base_url="https://github.com/goss-org/goss/releases/latest/download"
+          
+          curl -L ${goss_base_url}/goss-linux-amd64 -o /usr/local/bin/goss
+          chmod +rx /usr/local/bin/goss
+          curl -L ${goss_base_url}/kgoss -o /usr/local/bin/kgoss
+          chmod +rx /usr/local/bin/kgoss
+          curl -L ${goss_base_url}/dgoss -o /usr/local/bin/dgoss
+          chmod +rx /usr/local/bin/dgoss
+
         env:
           CONCIERGE_EXTRA_SNAPS: ${{ inputs.extra-snaps }}
 
