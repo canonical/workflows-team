@@ -81,7 +81,7 @@ jobs:
     timeout-minutes: ${{ inputs.timeout-minutes }}
     strategy:
       matrix:
-        just-target: ${{ fromJSON(inputs.just-test-targets) }}
+        just-target: ${{ fromJSON(inputs.just-targets) }}
       fail-fast: false
     defaults:
       run:
