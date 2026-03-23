@@ -119,4 +119,4 @@ jobs:
           sudo snap start docker
 
       - name: Run terraform apply
-        run: just ${{ matrix.just-test-target }}
+        run: just ${{ matrix.just-target }}
