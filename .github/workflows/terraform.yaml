@@ -21,6 +21,11 @@ on:
         default: false
         required: false
         type: boolean
+      just-targets:
+        description: "JSON list of just targets to run for the module under test"
+        default: '["test"]'
+        required: false
+        type: string
       timeout-minutes:
         description: "Timeout (in minutes) for the apply job"
         default: 60
@@ -71,9 +76,13 @@ jobs:
         run: just lint
 
   apply:
-    name: Terraform apply
+    name: Terraform apply (${{ matrix.just-target }})
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout-minutes }}
+    strategy:
+      matrix:
+        just-target: ${{ fromJSON(inputs.just-targets) }}
+      fail-fast: false
     defaults:
       run:
         working-directory: ${{ inputs.module-directory }}
@@ -86,16 +95,9 @@ jobs:
         run: |
           set -e
 
-          sudo apt-get purge $(dpkg -l | grep -i docker | awk '{print $2}')
-          sudo apt-get purge containerd.io
-          sudo rm -r /run/containerd
-
           sudo snap install concierge --classic
 
-          sudo snap install terraform --classic
-          sudo snap install just --classic
-
-          sudo -E concierge prepare -p k8s
+          sudo -E concierge prepare -p k8s --extra-snaps="terraform,just"
 
           # FIXME: Install via goss snap whenever available
           goss_base_url="https://github.com/goss-org/goss/releases/latest/download"
@@ -117,4 +119,4 @@ jobs:
           sudo snap start docker
 
       - name: Run terraform apply
-        run: just test
+        run: just ${{ matrix.just-target }}
