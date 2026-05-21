@@ -1,5 +1,5 @@
-# run secscan using the sbomber tool on all our charms
-# this manifest is used in `.github/workflows/charm-sbom.yaml`
+# run secscan using the sbomber tool on all temporal charms
+# this manifest is used in `.github/workflows/sbom_secscan.yaml`
 
 clients:
   sbom:

@@ -4,6 +4,15 @@ name: SSDLC scanning
 
 on:
     workflow_dispatch:
+      inputs:
+        product:
+          description: "Product to scan (use 'all' for both)"
+          type: choice
+          options:
+            - all
+            - temporal
+            - airflow
+          default: all
     schedule:
       - cron: "0 0 15 3,9 *"
 #              │ │ │  │    │
@@ -18,20 +27,20 @@ jobs:
         strategy:
           fail-fast: false
           matrix:
-            artifact: [charm]
+            product: ${{ (github.event_name == 'schedule' || inputs.product == 'all') && fromJSON('["temporal", "airflow"]') || fromJSON(format('["{0}"]', inputs.product)) }}
 
-        name: SSDLC scanning - all clients - ${{ matrix.artifact }} artifacts
+        name: SSDLC scanning - all clients - ${{ matrix.product }} artifacts
         steps:
           - name: Checkout
             uses: actions/checkout@v4
           - name: Run sbomber action
             uses: canonical/sbomber/.github/actions/run@main
             with:
-              manifest: "${{ github.workspace }}/sbom_secscan_manifest.yaml"
-              artifact-name: ${{ matrix.artifact }}
+              manifest: "${{ github.workspace }}/sbom_secscan_manifest_${{ matrix.product }}.yaml"
+              artifact-name: ${{ matrix.product }}
           - name: Notify team on scheduled failure
             if: failure() && github.event_name == 'schedule'
             uses: mattermost/action-mattermost-notify@master
             with:
               MATTERMOST_WEBHOOK_URL: $${{ secrets.MATTERMOST_WEBHOOK_URL }}
-              TEXT: SSDLC scheduled scan failed for `${{ matrix.artifact }}` in [$${{ github.repository }}]($${{ github.server_url }}/$${{ github.repository }}/actions/runs/$${{ github.run_id }})
+              TEXT: SSDLC scheduled scan failed for `${{ matrix.product }}` in [$${{ github.repository }}]($${{ github.server_url }}/$${{ github.repository }}/actions/runs/$${{ github.run_id }})

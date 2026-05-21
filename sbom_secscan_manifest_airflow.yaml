@@ -1,0 +1,44 @@
+# run secscan using the sbomber tool on all airflow charms and rocks
+# this manifest is used in `.github/workflows/sbom_secscan.yaml`
+
+clients:
+  sbom:
+    department: charm_engineering
+    email: workflows-charmers@canonical.com
+    team: analytics
+  secscan: {}
+
+artifacts:
+  - name: airflow-coordinator-k8s
+    channel: 3.1/edge
+    base: ubuntu@24.04
+    type: charm
+
+  - name: airflow-api-server-k8s
+    channel: 3.1/edge
+    base: ubuntu@24.04
+    type: charm
+
+  - name: airflow-scheduler-k8s
+    channel: 3.1/edge
+    base: ubuntu@24.04
+    type: charm
+
+  - name: airflow-dag-processor-k8s
+    channel: 3.1/edge
+    base: ubuntu@24.04
+    type: charm
+
+  - name: airflow-triggerer-k8s
+    channel: 3.1/edge
+    base: ubuntu@24.04
+    type: charm
+
+  - name: airflow-kubernetes-executor-k8s
+    channel: 3.1/edge
+    base: ubuntu@24.04
+    type: charm
+
+  - name: airflow
+    version: "3.1.8"
+    type: rock
