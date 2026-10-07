@@ -3,12 +3,12 @@ name: Test rock release OCI Factory
 on:
   pull_request:
     paths:
-      - ".github/workflows/rock_release_oci_factory.yaml"
+      - ".github/workflows/rock-release-oci-factory.yaml"
       - ".github/workflows/test_rock_release_oci_factory.yaml"
 
 jobs:
   test-release:
-    uses: ./.github/workflows/rock_release_oci_factory.yaml
+    uses: ./.github/workflows/rock-release-oci-factory.yaml
     with:
       source-repository: canonical/temporal-rocks
       source-ref: main
