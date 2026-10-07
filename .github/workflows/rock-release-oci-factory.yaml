@@ -409,6 +409,29 @@ jobs:
           git_user_signingkey: true
           git_commit_gpgsign: true
 
+      - name: Verify GPG passphrase
+        env:
+          GPG_PASSPHRASE: ${{ secrets.OCI_FACTORY_GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+
+          PASSPHRASE_FILE="${RUNNER_TEMP}/gpg-passphrase"
+          printf '%s' "$GPG_PASSPHRASE" > "$PASSPHRASE_FILE"
+          chmod 600 "$PASSPHRASE_FILE"
+
+          echo "test" | gpg \
+            --batch \
+            --yes \
+            --pinentry-mode loopback \
+            --passphrase-file "$PASSPHRASE_FILE" \
+            --armor \
+            --detach-sign \
+            > /dev/null
+
+          rm -f "$PASSPHRASE_FILE"
+
+          echo "GPG signing succeeded."
+            
       - name: Verify GitHub token
         env:
           GH_TOKEN: ${{ secrets.OCI_FACTORY_BOT_TOKEN }}
