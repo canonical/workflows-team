@@ -16,3 +16,4 @@ jobs:
       rock-support: minor
       risk-track: stable
       dry-run: true
+    secrets: inherit

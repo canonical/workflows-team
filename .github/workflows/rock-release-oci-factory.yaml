@@ -309,7 +309,7 @@ jobs:
           manifest_file="$oci_dir/oci/$ROCK_NAME/image.yaml"
           mkdir -p "$(dirname "$manifest_file")"
 
-          noctua_args=(upload_count
+          noctua_args=(
             rock manifest "$SOURCE_REPOSITORY"
             "--commit=$SOURCE_COMMIT"
             "--base=$ROCK_BASE"
