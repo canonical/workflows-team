@@ -1,0 +1,391 @@
+# Copyright 2026 Canonical Ltd.
+# See LICENSE file for licensing details.
+
+name: Release rock to OCI Factory
+
+on:
+  workflow_call:
+    inputs:
+      rock-directory:
+        description: "Directory containing the rockcraft.yaml"
+        required: true
+        type: string
+      source-repository:
+        description: "Source repository in owner/repo format. Defaults to the calling repository."
+        required: false
+        default: ""
+        type: string
+      source-ref:
+        description: "Git ref to release. Defaults to the calling workflow SHA."
+        required: false
+        default: ""
+        type: string
+      rock-support:
+        description: "Semantic version support level: major, minor, or patch"
+        required: false
+        default: "minor"
+        type: string
+      risk-track:
+        description: "OCI Factory risk track"
+        required: false
+        default: "stable"
+        type: string
+      dry-run:
+        description: "Generate and validate the OCI Factory change without pushing or opening a PR"
+        required: false
+        default: false
+        type: boolean
+    secrets:
+      OCI_FACTORY_BOT_TOKEN:
+        required: false
+      OCI_FACTORY_GPG_PRIVATE:
+        required: false
+      OCI_FACTORY_GPG_PASSPHRASE:
+        required: false
+
+  # Allows this workflow to be tested directly from workflows-team.
+  workflow_dispatch:
+    inputs:
+      source-repository:
+        description: "Source repository, e.g. canonical/temporal-rocks"
+        required: true
+        type: string
+      source-ref:
+        description: "Branch, tag, or SHA to release"
+        required: false
+        default: "main"
+        type: string
+      rock-directory:
+        description: "Directory containing rockcraft.yaml, e.g. temporal-ui/2.52.1"
+        required: true
+        type: string
+      rock-support:
+        description: "Semantic version support level"
+        required: true
+        default: "minor"
+        type: choice
+        options:
+          - major
+          - minor
+          - patch
+      risk-track:
+        description: "OCI Factory risk track"
+        required: true
+        default: "stable"
+        type: choice
+        options:
+          - stable
+          - candidate
+          - beta
+          - edge
+      dry-run:
+        description: "Do not push or open an OCI Factory PR"
+        required: true
+        default: true
+        type: boolean
+
+concurrency:
+  group: >-
+    ${{ github.workflow }}-${{
+      inputs.source-repository || github.repository
+    }}-${{ inputs.rock-directory }}
+  cancel-in-progress: true
+
+jobs:
+  release:
+    name: Release rock
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    env:
+      OCI_FACTORY_BOT_USERNAME: wf-charmers-bot
+      OCI_FACTORY_BOT_EMAIL: workflows-charmers@canonical.com
+
+    steps:
+      - name: Resolve source repository
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          repository="${{ inputs.source-repository }}"
+          ref="${{ inputs.source-ref }}"
+
+          if [[ -z "$repository" ]]; then
+            repository="${{ github.repository }}"
+          fi
+
+          if [[ -z "$ref" ]]; then
+            ref="${{ github.sha }}"
+          fi
+
+          echo "Repository: $repository"
+          echo "Ref: $ref"
+
+          echo "repository=$repository" >> "$GITHUB_OUTPUT"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout rock repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.source.outputs.repository }}
+          ref: ${{ steps.source.outputs.ref }}
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+
+          sudo snap install concierge --classic
+
+          cat > concierge.yaml << EOF
+          juju:
+            disable: true
+          providers:
+            lxd:
+              enable: true
+          host:
+            packages:
+              - gnome-keyring
+              - python3-pip
+              - python3-venv
+            snaps:
+              jq:
+              yq:
+              rockcraft:
+                channel: latest/edge
+          EOF
+
+          sudo concierge prepare -c concierge.yaml
+          sudo snap install astral-uv --classic
+
+      - name: Validate rock and extract metadata
+        id: rock
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rock_directory="${{ inputs.rock-directory }}"
+          rock_directory="${rock_directory#./}"
+          rock_directory="${rock_directory%/}"
+
+          if [[ ! -f "$rock_directory/rockcraft.yaml" ]]; then
+            echo "Error: $rock_directory/rockcraft.yaml does not exist" >&2
+            exit 1
+          fi
+
+          rockcraft_file="$rock_directory/rockcraft.yaml"
+
+          rock_name="$(yq -r '.name // ""' "$rockcraft_file")"
+          rock_version="$(yq -r '.version // ""' "$rockcraft_file")"
+          rock_base="$(yq -r '.base // ""' "$rockcraft_file")"
+
+          if [[ "$rock_base" == "bare" ]]; then
+            rock_base="$(yq -r '.["build-base"] // ""' "$rockcraft_file")"
+          fi
+
+          rock_base="${rock_base##*@}"
+
+          if [[ -z "$rock_name" || -z "$rock_version" || -z "$rock_base" ]]; then
+            echo "Error: could not determine rock name, version, or base" >&2
+            exit 1
+          fi
+
+          directory_version="$(basename "$rock_directory")"
+
+          # Supports directories such as temporal-server/1.24 whose
+          # rockcraft.yaml may contain a patch version such as 1.24.2.
+          if [[ "$directory_version" != "$rock_version" &&
+                "$rock_version" != "$directory_version".* ]]; then
+            echo "Error: directory version ($directory_version) does not match rock version ($rock_version)" >&2
+            exit 1
+          fi
+
+          directory_prefix="$(dirname "$rock_directory")"
+
+          if [[ "$directory_prefix" == "." ]]; then
+            directory_prefix=""
+          fi
+
+          source_commit="$(git rev-parse HEAD)"
+
+          echo "Rock name: $rock_name"
+          echo "Rock version: $rock_version"
+          echo "Rock base: $rock_base"
+          echo "Rock directory: $rock_directory"
+          echo "Directory prefix: $directory_prefix"
+          echo "Source commit: $source_commit"
+
+          echo "name=$rock_name" >> "$GITHUB_OUTPUT"
+          echo "version=$rock_version" >> "$GITHUB_OUTPUT"
+          echo "base=$rock_base" >> "$GITHUB_OUTPUT"
+          echo "directory=$rock_directory" >> "$GITHUB_OUTPUT"
+          echo "directory-prefix=$directory_prefix" >> "$GITHUB_OUTPUT"
+          echo "commit=$source_commit" >> "$GITHUB_OUTPUT"
+
+      # Observability also builds the rock before requesting an OCI Factory
+      # release. This catches build failures before opening the PR.
+      - name: Pack rock
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "${{ steps.rock.outputs.directory }}"
+          rockcraft pack
+
+      - name: Validate release credentials
+        if: ${{ inputs.dry-run == false }}
+        env:
+          BOT_TOKEN: ${{ secrets.OCI_FACTORY_BOT_TOKEN }}
+          GPG_PRIVATE: ${{ secrets.OCI_FACTORY_GPG_PRIVATE }}
+          GPG_PASSPHRASE: ${{ secrets.OCI_FACTORY_GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+
+          [[ -n "$BOT_TOKEN" ]] || {
+            echo "OCI_FACTORY_BOT_TOKEN is not configured" >&2
+            exit 1
+          }
+
+          [[ -n "$GPG_PRIVATE" ]] || {
+            echo "OCI_FACTORY_GPG_PRIVATE is not configured" >&2
+            exit 1
+          }
+
+          [[ -n "$GPG_PASSPHRASE" ]] || {
+            echo "OCI_FACTORY_GPG_PASSPHRASE is not configured" >&2
+            exit 1
+          }
+
+      - name: Import bot GPG key
+        if: ${{ inputs.dry-run == false }}
+        uses: crazy-max/ghaction-import-gpg@v7
+        with:
+          gpg_private_key: ${{ secrets.OCI_FACTORY_GPG_PRIVATE }}
+          passphrase: ${{ secrets.OCI_FACTORY_GPG_PASSPHRASE }}
+          git_config_global: true
+          git_user_signingkey: true
+          git_commit_gpgsign: true
+
+      - name: Generate OCI Factory change
+        env:
+          GH_TOKEN: ${{ secrets.OCI_FACTORY_BOT_TOKEN }}
+          SOURCE_REPOSITORY: ${{ steps.source.outputs.repository }}
+          ROCK_NAME: ${{ steps.rock.outputs.name }}
+          ROCK_VERSION: ${{ steps.rock.outputs.version }}
+          ROCK_BASE: ${{ steps.rock.outputs.base }}
+          ROCK_DIRECTORY_PREFIX: ${{ steps.rock.outputs.directory-prefix }}
+          SOURCE_COMMIT: ${{ steps.rock.outputs.commit }}
+          ROCK_SUPPORT: ${{ inputs.rock-support }}
+          RISK_TRACK: ${{ inputs.risk-track }}
+          DRY_RUN: ${{ inputs.dry-run }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tmp_dir="$(mktemp -d)"
+          trap 'rm -rf "$tmp_dir"' EXIT
+
+          oci_dir="$tmp_dir/oci-factory"
+
+          if [[ "$DRY_RUN" == "true" ]]; then
+            echo "Dry run: cloning canonical/oci-factory"
+
+            git clone --depth 1 \
+              https://github.com/canonical/oci-factory.git \
+              "$oci_dir"
+          else
+            echo "Syncing ${OCI_FACTORY_BOT_USERNAME}/oci-factory"
+
+            gh repo sync --force \
+              "${OCI_FACTORY_BOT_USERNAME}/oci-factory"
+
+            git clone \
+              "https://github.com/${OCI_FACTORY_BOT_USERNAME}/oci-factory" \
+              "$oci_dir"
+          fi
+
+          manifest_file="$oci_dir/oci/$ROCK_NAME/image.yaml"
+          mkdir -p "$(dirname "$manifest_file")"
+
+          noctua_args=(
+            rock manifest "$SOURCE_REPOSITORY"
+            "--commit=$SOURCE_COMMIT"
+            "--base=$ROCK_BASE"
+            "--support=$ROCK_SUPPORT"
+            "--risk=$RISK_TRACK"
+            "--version=$ROCK_VERSION"
+          )
+
+          # Needed for monorepos such as canonical/temporal-rocks.
+          # temporal-ui/2.52.1 becomes:
+          #   --directory=temporal-ui
+          if [[ -n "$ROCK_DIRECTORY_PREFIX" ]]; then
+            noctua_args+=("--directory=$ROCK_DIRECTORY_PREFIX")
+          fi
+
+          uvx --from=git+https://github.com/lucabello/noctua \
+            noctua "${noctua_args[@]}" \
+            | tee "$manifest_file"
+
+          upload_count="$(yq '.upload | length' "$manifest_file")"
+
+          if [[ "$upload_count" -eq 0 ]]; then
+            echo "Nothing to update in OCI Factory"
+            exit 0
+          fi
+
+          cd "$oci_dir"
+
+          echo
+          echo "OCI Factory change:"
+          git status --short
+          git diff -- "oci/$ROCK_NAME/image.yaml"
+
+          if [[ -z "$(git status --porcelain -- "oci/$ROCK_NAME/image.yaml")" ]]; then
+            echo "OCI Factory manifest is already up to date"
+            exit 0
+          fi
+
+          if [[ "$DRY_RUN" == "true" ]]; then
+            git config user.name "workflows-team-ci"
+            git config user.email "workflows-team-ci@users.noreply.github.com"
+
+            git checkout -b "dry-run-$ROCK_NAME"
+            git add "oci/$ROCK_NAME/image.yaml"
+
+            git commit \
+              --no-gpg-sign \
+              -m "chore: Add new $ROCK_NAME releases"
+
+            echo
+            echo "Dry-run commit:"
+            git show --stat --oneline HEAD
+
+            echo
+            echo "Dry run complete; nothing was pushed."
+            exit 0
+          fi
+
+          git config user.name "$OCI_FACTORY_BOT_USERNAME"
+          git config user.email "$OCI_FACTORY_BOT_EMAIL"
+
+          git remote set-url origin \
+            "https://x-access-token:${GH_TOKEN}@github.com/${OCI_FACTORY_BOT_USERNAME}/oci-factory.git"
+
+          branch_name="update-$(date +%s)"
+
+          git checkout -b "$branch_name"
+          git add "oci/$ROCK_NAME/image.yaml"
+          git commit -m "chore: Add new $ROCK_NAME releases"
+
+          git push -u origin "$branch_name" --force
+
+          gh pr create \
+            --repo canonical/oci-factory \
+            --head "${OCI_FACTORY_BOT_USERNAME}:${branch_name}" \
+            --title "chore: Add new $ROCK_NAME releases" \
+            --body "This is an automatic PR opened by the Workflow Charmers bot."
+
+          echo "OCI Factory PR created."
