@@ -335,7 +335,7 @@ jobs:
             noctua "${noctua_args[@]}" \
             | tee "$manifest_file"
 
-          upload_count="$(yq '.upload | length' "$manifest_file")"
+          upload_count="$(cat "$manifest_file" | yq '.upload | length')"
 
           if [[ "$upload_count" -eq 0 ]]; then
             echo "Nothing to update in OCI Factory"
