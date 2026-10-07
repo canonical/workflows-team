@@ -325,6 +325,12 @@ jobs:
             noctua_args+=("--directory=$ROCK_DIRECTORY_PREFIX")
           fi
 
+          if [[ -n "$ROCK_DIRECTORY_PREFIX" ]]; then
+            cd "${{ github.workspace }}/$ROCK_DIRECTORY_PREFIX"
+          else
+            cd "${{ github.workspace }}"
+          fi
+
           uvx --from=git+https://github.com/lucabello/noctua \
             noctua "${noctua_args[@]}" \
             | tee "$manifest_file"
