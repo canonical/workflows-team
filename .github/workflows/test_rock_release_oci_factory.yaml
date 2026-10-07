@@ -1,0 +1,18 @@
+name: Test rock release OCI Factory
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/rock_release_oci_factory.yaml"
+      - ".github/workflows/test_rock_release_oci_factory.yaml"
+
+jobs:
+  test-release:
+    uses: ./.github/workflows/rock_release_oci_factory.yaml
+    with:
+      source-repository: canonical/temporal-rocks
+      source-ref: main
+      rock-directory: temporal-ui/2.52.1
+      rock-support: minor
+      risk-track: stable
+      dry-run: true
