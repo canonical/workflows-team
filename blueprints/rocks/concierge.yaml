@@ -20,4 +20,4 @@ host:
     yq:
     just:
     rockcraft:
-      channel: latest/edge
+      channel: latest/stable
