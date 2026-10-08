@@ -1,5 +1,3 @@
-# blueprints/rocks/concierge.yaml
-
 juju:
   disable: true
 
