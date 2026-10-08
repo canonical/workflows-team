@@ -7,7 +7,22 @@ set shell := ["bash", "-uc"]
 
 # Build a rock from the requested rock directory.
 pack rock_directory:
-    cd "{{ rock_directory }}" && rockcraft pack
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    rock_directory="{{ rock_directory }}"
+    rock_directory="${rock_directory#./}"
+    rock_directory="${rock_directory%/}"
+
+    directory_version="$(basename "$rock_directory")"
+
+    if [[ ! "$directory_version" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+        echo "Skipping non-version rock directory: $rock_directory"
+        exit 0
+    fi
+
+    cd "$rock_directory"
+    rockcraft pack
 
 
 # Generate the OCI Factory manifest and either:
@@ -32,6 +47,13 @@ release-oci-factory rock_directory source_repository source_commit support="mino
         exit 1
     fi
 
+    directory_version="$(basename "$rock_directory")"
+
+    if [[ ! "$directory_version" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+        echo "Skipping non-version rock directory: $rock_directory"
+        exit 0
+    fi
+
     if ! compgen -G "$rock_directory/*.rock" > /dev/null; then
         echo "Error: no packed rock found in $rock_directory" >&2
         echo "Run the pack recipe before release-oci-factory." >&2
@@ -54,8 +76,6 @@ release-oci-factory rock_directory source_repository source_commit support="mino
         echo "Error: could not determine rock name, version, or base" >&2
         exit 1
     fi
-
-    directory_version="$(basename "$rock_directory")"
 
     # Allow directories such as 1.24 to contain patch versions such as 1.24.2.
     if [[ "$directory_version" != "$rock_version" &&
@@ -117,8 +137,15 @@ release-oci-factory rock_directory source_repository source_commit support="mino
             "$oci_dir"
     fi
 
-    manifest_file="$oci_dir/oci/$rock_name/image.yaml"
-    mkdir -p "$(dirname "$manifest_file")"
+    image_dir="$oci_dir/oci/$rock_name"
+
+    if [[ ! -d "$image_dir" ]]; then
+        echo "Error: oci/$rock_name does not exist in OCI Factory." >&2
+        echo "Request onboarding first: https://github.com/canonical/oci-factory/issues/new/choose" >&2
+        exit 1
+    fi
+
+    manifest_file="$image_dir/image.yaml"
 
     noctua_args=(
         rock manifest "$source_repository"
@@ -195,7 +222,7 @@ release-oci-factory rock_directory source_repository source_commit support="mino
     git remote set-url origin \
         "https://x-access-token:${GH_TOKEN}@github.com/${OCI_FACTORY_BOT_USERNAME}/oci-factory.git"
 
-    branch_name="update-$(date +%s)"
+    branch_name="update-${rock_name}-$(date +%s)"
 
     git checkout -b "$branch_name"
     git add "oci/$rock_name/image.yaml"

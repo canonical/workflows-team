@@ -61,6 +61,7 @@ jobs:
   release:
     name: Release rock
     runs-on: ubuntu-latest
+    timeout-minutes: 90
 
     permissions:
       contents: read
@@ -126,6 +127,8 @@ jobs:
               - python3-pip
               - python3-venv
             snaps:
+              astral-uv:
+                channel: latest/stable
               jq:
               yq:
               just:
@@ -134,7 +137,6 @@ jobs:
           EOF
 
           sudo concierge prepare -c concierge.yaml
-          sudo snap install astral-uv --classic
 
       - name: Pack rock
         shell: bash
