@@ -5,26 +5,6 @@
 set shell := ["bash", "-uc"]
 
 
-# Build a rock from the requested rock directory.
-pack rock_directory:
-    #!/usr/bin/env bash
-    set -euo pipefail
-
-    rock_directory="{{ rock_directory }}"
-    rock_directory="${rock_directory#./}"
-    rock_directory="${rock_directory%/}"
-
-    directory_version="$(basename "$rock_directory")"
-
-    if [[ ! "$directory_version" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
-        echo "Skipping non-version rock directory: $rock_directory"
-        exit 0
-    fi
-
-    cd "$rock_directory"
-    rockcraft pack
-
-
 # Generate the OCI Factory manifest and either:
 # - create a local commit for a dry run, or
 # - push a signed commit and open an OCI Factory PR.
@@ -52,12 +32,6 @@ release-oci-factory rock_directory source_repository source_commit support="mino
     if [[ ! "$directory_version" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
         echo "Skipping non-version rock directory: $rock_directory"
         exit 0
-    fi
-
-    if ! compgen -G "$rock_directory/*.rock" > /dev/null; then
-        echo "Error: no packed rock found in $rock_directory" >&2
-        echo "Run the pack recipe before release-oci-factory." >&2
-        exit 1
     fi
 
     rockcraft_file="$rock_directory/rockcraft.yaml"
@@ -117,23 +91,23 @@ release-oci-factory rock_directory source_repository source_commit support="mino
             exit 1
         fi
 
-        if [[ -z "${OCI_FACTORY_BOT_USERNAME:-}" ]]; then
-            echo "Error: OCI_FACTORY_BOT_USERNAME is not configured" >&2
+        if [[ -z "${WF_CHARMERS_BOT_USERNAME:-}" ]]; then
+            echo "Error: WF_CHARMERS_BOT_USERNAME is not configured" >&2
             exit 1
         fi
 
-        if [[ -z "${OCI_FACTORY_BOT_EMAIL:-}" ]]; then
-            echo "Error: OCI_FACTORY_BOT_EMAIL is not configured" >&2
+        if [[ -z "${WF_CHARMERS_BOT_EMAIL:-}" ]]; then
+            echo "Error: WF_CHARMERS_BOT_EMAIL is not configured" >&2
             exit 1
         fi
 
-        echo "Syncing ${OCI_FACTORY_BOT_USERNAME}/oci-factory"
+        echo "Syncing ${WF_CHARMERS_BOT_USERNAME}/oci-factory"
 
         gh repo sync --force \
-            "${OCI_FACTORY_BOT_USERNAME}/oci-factory"
+            "${WF_CHARMERS_BOT_USERNAME}/oci-factory"
 
         git clone \
-            "https://github.com/${OCI_FACTORY_BOT_USERNAME}/oci-factory" \
+            "https://github.com/${WF_CHARMERS_BOT_USERNAME}/oci-factory" \
             "$oci_dir"
     fi
 
@@ -216,11 +190,11 @@ release-oci-factory rock_directory source_repository source_commit support="mino
         exit 0
     fi
 
-    git config user.name "$OCI_FACTORY_BOT_USERNAME"
-    git config user.email "$OCI_FACTORY_BOT_EMAIL"
+    git config user.name "$WF_CHARMERS_BOT_USERNAME"
+    git config user.email "$WF_CHARMERS_BOT_EMAIL"
 
     git remote set-url origin \
-        "https://x-access-token:${GH_TOKEN}@github.com/${OCI_FACTORY_BOT_USERNAME}/oci-factory.git"
+        "https://x-access-token:${GH_TOKEN}@github.com/${WF_CHARMERS_BOT_USERNAME}/oci-factory.git"
 
     branch_name="update-${rock_name}-$(date +%s)"
 
@@ -234,7 +208,7 @@ release-oci-factory rock_directory source_repository source_commit support="mino
 
     gh pr create \
         --repo canonical/oci-factory \
-        --head "${OCI_FACTORY_BOT_USERNAME}:${branch_name}" \
+        --head "${WF_CHARMERS_BOT_USERNAME}:${branch_name}" \
         --title "chore: Add new $rock_name releases" \
         --body "This is an automatic PR opened by the Workflow Charmers bot."
 
