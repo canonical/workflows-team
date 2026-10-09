@@ -1,10 +1,6 @@
 juju:
   disable: true
 
-providers:
-  lxd:
-    enable: true
-
 host:
   packages:
     - gnome-keyring
@@ -17,5 +13,3 @@ host:
     jq:
     yq:
     just:
-    rockcraft:
-      channel: latest/stable
