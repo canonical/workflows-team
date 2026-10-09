@@ -1,0 +1,180 @@
+# Copyright 2026 Canonical Ltd.
+#
+# See LICENSE file for licensing details.
+
+name: Release rock to OCI Factory
+
+on:
+  workflow_call:
+    inputs:
+      rock-directory:
+        description: "Directory containing the rockcraft.yaml"
+        required: true
+        type: string
+
+      source-repository:
+        description: "Source repository in owner/repo format. Defaults to the calling repository."
+        required: false
+        default: ""
+        type: string
+
+      source-ref:
+        description: "Git ref to release. Defaults to the calling workflow SHA."
+        required: false
+        default: ""
+        type: string
+
+      rock-support:
+        description: "Semantic version support level: major, minor, or patch"
+        required: false
+        default: "minor"
+        type: string
+
+      risk-track:
+        description: "OCI Factory risk track"
+        required: false
+        default: "stable"
+        type: string
+
+      dry-run:
+        description: "Generate and validate the OCI Factory change without pushing or opening a PR"
+        required: false
+        default: false
+        type: boolean
+
+    secrets:
+      WF_CHARMERS_BOT_TOKEN:
+        required: false
+      WF_CHARMERS_BOT_GPG_PRIVATE:
+        required: false
+      WF_CHARMERS_BOT_GPG_PASSPHRASE:
+        required: false
+
+concurrency:
+  group: >-
+    ${{ github.workflow }}-${{
+      inputs.source-repository || github.repository
+    }}-${{ inputs.rock-directory }}
+  cancel-in-progress: true
+
+jobs:
+  release:
+    name: Release rock
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    permissions:
+      contents: read
+
+    env:
+      WF_CHARMERS_BOT_USERNAME: wf-charmers-bot
+      WF_CHARMERS_BOT_EMAIL: workflows-charmers@canonical.com
+
+    steps:
+      - name: Resolve source repository
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          repository="${{ inputs.source-repository }}"
+          ref="${{ inputs.source-ref }}"
+
+          if [[ -z "$repository" ]]; then
+            repository="${{ github.repository }}"
+          fi
+
+          if [[ -z "$ref" ]]; then
+            ref="${{ github.sha }}"
+          fi
+
+          echo "Repository: $repository"
+          echo "Ref: $ref"
+
+          echo "repository=$repository" >> "$GITHUB_OUTPUT"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout rock repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.source.outputs.repository }}
+          ref: ${{ steps.source.outputs.ref }}
+          fetch-depth: 0
+          path: source
+
+      - name: Checkout workflow resources
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: workflows-team
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+
+          sudo snap install concierge --classic
+
+          sudo concierge prepare \
+            -c "${{ github.workspace }}/workflows-team/blueprints/rocks/concierge.yaml"
+
+      - name: Validate release credentials
+        if: ${{ inputs.dry-run == false }}
+        env:
+          BOT_TOKEN: ${{ secrets.WF_CHARMERS_BOT_TOKEN }}
+          GPG_PRIVATE: ${{ secrets.WF_CHARMERS_BOT_GPG_PRIVATE }}
+          GPG_PASSPHRASE: ${{ secrets.WF_CHARMERS_BOT_GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+
+          [[ -n "$BOT_TOKEN" ]] || {
+            echo "WF_CHARMERS_BOT_TOKEN is not configured" >&2
+            exit 1
+          }
+
+          [[ -n "$GPG_PRIVATE" ]] || {
+            echo "WF_CHARMERS_BOT_GPG_PRIVATE is not configured" >&2
+            exit 1
+          }
+
+          [[ -n "$GPG_PASSPHRASE" ]] || {
+            echo "WF_CHARMERS_BOT_GPG_PASSPHRASE is not configured" >&2
+            exit 1
+          }
+
+      - name: Import bot GPG key
+        if: ${{ inputs.dry-run == false }}
+        uses: crazy-max/ghaction-import-gpg@v7
+        with:
+          gpg_private_key: ${{ secrets.WF_CHARMERS_BOT_GPG_PRIVATE }}
+          passphrase: ${{ secrets.WF_CHARMERS_BOT_GPG_PASSPHRASE }}
+          git_config_global: true
+          git_user_signingkey: true
+          git_commit_gpgsign: true
+
+      - name: Release to OCI Factory
+        env:
+          GH_TOKEN: ${{ secrets.WF_CHARMERS_BOT_TOKEN }}
+          ROCK_DIRECTORY: ${{ inputs.rock-directory }}
+          SOURCE_REPOSITORY: ${{ steps.source.outputs.repository }}
+          ROCK_SUPPORT: ${{ inputs.rock-support }}
+          RISK_TRACK: ${{ inputs.risk-track }}
+          DRY_RUN: ${{ inputs.dry-run }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SOURCE_COMMIT="$(
+            git -C "${{ github.workspace }}/source" rev-parse HEAD
+          )"
+
+          just \
+            --justfile "${{ github.workspace }}/workflows-team/blueprints/rocks/rocks.just" \
+            --working-directory "${{ github.workspace }}/source" \
+            release-oci-factory \
+            "$ROCK_DIRECTORY" \
+            "$SOURCE_REPOSITORY" \
+            "$SOURCE_COMMIT" \
+            "$ROCK_SUPPORT" \
+            "$RISK_TRACK" \
+            "$DRY_RUN"
