@@ -1,0 +1,186 @@
+name: Airflow nightly integration
+
+on:
+  workflow_call:
+    inputs:
+      source-repository:
+        description: Source owner/repo. Empty uses the calling repository.
+        default: ''
+        type: string
+      source-ref:
+        description: Source branch, tag, or SHA. Required for another repository; otherwise defaults to the caller SHA.
+        default: ''
+        type: string
+      juju-channel:
+        description: Juju snap channel to test.
+        required: true
+        type: string
+      postgres-channel:
+        description: PostgreSQL channel passed to the repository's tests.
+        default: '14/stable'
+        type: string
+      postgres-force:
+        description: Allow deployment of a PostgreSQL charm without declared Juju support.
+        default: false
+        type: boolean
+      test-commands:
+        description: JSON array of integration commands, each run on a separate runner.
+        default: '["just integration"]'
+        type: string
+      setup-command:
+        description: Optional repository-specific setup after provisioning.
+        default: ''
+        type: string
+      runner:
+        default: self-hosted-linux-amd64-noble-medium
+        type: string
+      timeout-minutes:
+        default: 90
+        type: number
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    strategy:
+      fail-fast: false
+      matrix:
+        command: ${{ fromJSON(inputs.test-commands) }}
+    outputs:
+      source-sha: ${{ steps.commit.outputs.sha }}
+    env:
+      POSTGRES_CHANNEL: ${{ inputs.postgres-channel }}
+      POSTGRES_FORCE_DEPLOY: ${{ inputs.postgres-force && '1' || '' }}
+    steps:
+      - name: Resolve source
+        id: source
+        shell: bash
+        env:
+          SOURCE_REPOSITORY: ${{ inputs.source-repository || github.repository }}
+          SOURCE_REF: ${{ inputs.source-ref }}
+          JUJU_CHANNEL: ${{ inputs.juju-channel }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$SOURCE_REF" ]]; then
+            if [[ "$SOURCE_REPOSITORY" != "$GITHUB_REPOSITORY" ]]; then
+              echo "source-ref is required when testing another repository" >&2
+              exit 1
+            fi
+            SOURCE_REF="$GITHUB_SHA"
+          fi
+          echo "repository=$SOURCE_REPOSITORY" >> "$GITHUB_OUTPUT"
+          echo "ref=$SOURCE_REF" >> "$GITHUB_OUTPUT"
+          echo "artifact-key=${SOURCE_REPOSITORY//\//-}-${SOURCE_REF//\//-}-${JUJU_CHANNEL//\//-}" >> "$GITHUB_OUTPUT"
+      - name: Maximise GH runner space
+        uses: jlumbroso/free-disk-space@v1.3.1
+      - name: Checkout source repository
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ steps.source.outputs.repository }}
+          ref: ${{ steps.source.outputs.ref }}
+          persist-credentials: false
+      - name: Record source commit
+        id: commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha=$(git rev-parse HEAD)
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          printf 'Source commit: %s\n' "$sha"
+      - name: Prepare integration environment
+        shell: bash
+        env:
+          JUJU_CHANNEL: ${{ inputs.juju-channel }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get purge -y $(dpkg -l | grep -i docker | awk '{print $2}') || true
+          sudo apt-get purge -y containerd.io || true
+          sudo rm -rf /run/containerd || true
+          sudo snap install concierge --classic
+          sudo -E concierge prepare -p k8s --extra-snaps=astral-uv,just \
+            --juju-channel="$JUJU_CHANNEL"
+          mkdir -p ~/.kube
+          sudo k8s kubectl config view --raw > ~/.kube/config
+          uv tool install tox
+          juju version
+          juju controllers
+          snap list juju
+      - name: Repository setup
+        if: ${{ inputs.setup-command != '' }}
+        shell: bash
+        env:
+          SETUP_COMMAND: ${{ inputs.setup-command }}
+        run: bash -euo pipefail -c "$SETUP_COMMAND"
+      - name: Run integration tests
+        shell: bash
+        env:
+          TEST_COMMAND: ${{ matrix.command }}
+        run: |
+          set -euo pipefail
+          bash -euo pipefail -c "$TEST_COMMAND" 2>&1 | tee integration.log
+      - name: Collect failure diagnostics
+        if: ${{ failure() }}
+        shell: bash
+        run: |
+          mkdir -p diagnostics
+          juju version > diagnostics/juju-version.txt 2>&1 || true
+          juju controllers --format yaml > diagnostics/controllers.yaml 2>&1 || true
+          juju models --format yaml > diagnostics/models.yaml 2>&1 || true
+          if juju models --format json > diagnostics/models.json 2>&1; then
+            while IFS= read -r model; do
+              juju status -m "$model" --relations >> diagnostics/status.txt 2>&1 || true
+              juju debug-log -m "$model" --replay --no-tail >> diagnostics/juju.log 2>&1 || true
+            done < <(jq -r '.models[] | select(."short-name" != "controller") | .name' diagnostics/models.json)
+          fi
+          sudo k8s kubectl get pods -A -o wide > diagnostics/pods.txt 2>&1 || true
+          sudo k8s kubectl get events -A --sort-by=.lastTimestamp > diagnostics/events.txt 2>&1 || true
+      - name: Upload failure diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: juju-nightly-${{ steps.source.outputs.artifact-key }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: |
+            integration.log
+            diagnostics/
+          retention-days: 14
+
+  report-failure:
+    needs: integration
+    if: ${{ failure() && github.event_name == 'schedule' }}
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    concurrency:
+      group: juju-nightly-report-${{ github.repository }}-${{ inputs.source-repository || github.repository }}-${{ inputs.source-ref }}-${{ inputs.juju-channel }}
+      cancel-in-progress: false
+    steps:
+      - name: Open or update nightly failure issue
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ISSUE_TITLE: Nightly Juju integration failing (${{ inputs.source-repository || github.repository }} @ ${{ inputs.source-ref || github.ref_name }}, ${{ inputs.juju-channel }})
+          SOURCE_REPOSITORY: ${{ inputs.source-repository || github.repository }}
+          SOURCE_REF: ${{ inputs.source-ref || github.sha }}
+          SOURCE_SHA: ${{ needs.integration.outputs.source-sha }}
+          JUJU_CHANNEL: ${{ inputs.juju-channel }}
+          POSTGRES_CHANNEL: ${{ inputs.postgres-channel }}
+          POSTGRES_FORCE: ${{ inputs.postgres-force }}
+        run: |
+          set -euo pipefail
+          marker='<!-- airflow-nightly-failure -->'
+          existing=$(gh issue list -R "$GITHUB_REPOSITORY" --state open \
+            --search "\"$ISSUE_TITLE\" in:title" --json number,title,body | \
+            jq -r --arg title "$ISSUE_TITLE" --arg marker "$marker" \
+              'map(select(.title == $title and ((.body // "") | contains($marker)))) | .[0].number // empty')
+          body=$(printf '%s\n\nRun: %s\nSource repository: %s\nSource ref: %s\nSource commit: %s\nJuju channel: %s\nPostgreSQL channel: %s\nForce PostgreSQL deployment: %s\n\nReview failed jobs and diagnostic artifacts before assigning a root cause.' \
+            "$marker" "$RUN_URL" "$SOURCE_REPOSITORY" "$SOURCE_REF" "${SOURCE_SHA:-checkout did not complete}" "$JUJU_CHANNEL" "$POSTGRES_CHANNEL" "$POSTGRES_FORCE")
+          if [[ -n "$existing" ]]; then
+            gh issue comment "$existing" -R "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create -R "$GITHUB_REPOSITORY" --title "$ISSUE_TITLE" --body "$body"
+          fi
