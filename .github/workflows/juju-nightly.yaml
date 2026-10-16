@@ -79,9 +79,6 @@ jobs:
     name: Juju integration (${{ matrix.command }})
     runs-on: ${{ inputs.runner }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
-    permissions:
-      contents: read
-      actions: write
     strategy:
       fail-fast: false
       matrix:
