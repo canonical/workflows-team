@@ -11,8 +11,13 @@ on:
         required: true
         type: string
       provider:
-        description: Concierge provider to bootstrap.
+        description: Concierge preset passed as -p. Not passed when concierge-config is set. A value of k8s also writes kubeconfig and collects pod diagnostics.
         default: k8s
+        required: false
+        type: string
+      concierge-config:
+        description: Path to a concierge config file, relative to the repository root. When set, prepare uses -c instead of -p.
+        default: ""
         required: false
         type: string
       test-commands:
@@ -109,6 +114,7 @@ jobs:
         env:
           JUJU_CHANNEL: ${{ inputs.juju-channel }}
           PROVIDER: ${{ inputs.provider }}
+          CONCIERGE_CONFIG: ${{ inputs.concierge-config }}
           EXTRA_SNAPS: ${{ inputs.extra-snaps }}
           PURGE_DOCKER: ${{ inputs.purge-docker }}
         run: |
@@ -123,7 +129,11 @@ jobs:
 
           sudo snap install concierge --classic
 
-          args=(-p "$PROVIDER" --juju-channel="$JUJU_CHANNEL")
+          if [[ -n "$CONCIERGE_CONFIG" ]]; then
+            args=(-c "$CONCIERGE_CONFIG" --juju-channel="$JUJU_CHANNEL")
+          else
+            args=(-p "$PROVIDER" --juju-channel="$JUJU_CHANNEL")
+          fi
           if [[ -n "$EXTRA_SNAPS" ]]; then
             args+=(--extra-snaps="$EXTRA_SNAPS")
           fi
