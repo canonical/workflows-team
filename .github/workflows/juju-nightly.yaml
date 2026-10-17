@@ -1,0 +1,259 @@
+# Copyright 2026 Canonical Ltd.
+# See LICENSE file for licensing details.
+
+name: Juju nightly integration
+
+on:
+  workflow_call:
+    inputs:
+      juju-channel:
+        description: Juju snap channel passed to concierge.
+        required: true
+        type: string
+      provider:
+        description: Concierge preset passed as -p. Not passed when concierge-config is set. A value of k8s also writes kubeconfig and collects pod diagnostics.
+        default: k8s
+        required: false
+        type: string
+      concierge-config:
+        description: Path to a concierge config file, relative to the repository root. When set, prepare uses -c instead of -p.
+        default: ""
+        required: false
+        type: string
+      test-commands:
+        description: JSON array of test commands. Each command runs on its own runner.
+        default: '["just integration"]'
+        required: false
+        type: string
+      setup-command:
+        description: Optional command run after the environment is provisioned.
+        default: ""
+        required: false
+        type: string
+      working-directory:
+        description: Directory, relative to the repository root, for setup and test commands.
+        default: .
+        required: false
+        type: string
+      extra-snaps:
+        description: Comma-separated snaps installed by concierge alongside Juju.
+        default: astral-uv,just
+        required: false
+        type: string
+      extra-env:
+        description: JSON object of environment variables exported for setup and test commands.
+        default: "{}"
+        required: false
+        type: string
+      purge-docker:
+        description: Remove Docker before bootstrapping. Needed when the runner already has Docker and the provider is k8s.
+        default: false
+        required: false
+        type: boolean
+      install-docker:
+        description: Install the Docker snap after the provider is bootstrapped.
+        default: false
+        required: false
+        type: boolean
+      free-disk-space:
+        description: Free disk space on the runner before provisioning.
+        default: false
+        required: false
+        type: boolean
+      issue-label:
+        description: Label for the scheduled-failure issue. The label must already exist. Empty skips labeling.
+        default: ""
+        required: false
+        type: string
+      runner:
+        description: Runner label for the integration jobs.
+        default: self-hosted-linux-amd64-noble-medium
+        required: false
+        type: string
+      timeout-minutes:
+        description: Timeout for each integration job.
+        default: 90
+        required: false
+        type: number
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    name: Juju integration (${{ matrix.command }})
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    strategy:
+      fail-fast: false
+      matrix:
+        command: ${{ fromJSON(inputs.test-commands) }}
+    steps:
+      - name: Maximise runner disk space
+        if: ${{ inputs.free-disk-space }}
+        uses: jlumbroso/free-disk-space@v1.3.1
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Resolve artifact name
+        id: meta
+        shell: bash
+        env:
+          JUJU_CHANNEL: ${{ inputs.juju-channel }}
+        run: |
+          set -euo pipefail
+          repo="${GITHUB_REPOSITORY//\//-}"
+          channel="${JUJU_CHANNEL//\//-}"
+          echo "artifact-key=${repo}-${channel}" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare integration environment
+        shell: bash
+        env:
+          JUJU_CHANNEL: ${{ inputs.juju-channel }}
+          PROVIDER: ${{ inputs.provider }}
+          CONCIERGE_CONFIG: ${{ inputs.concierge-config }}
+          EXTRA_SNAPS: ${{ inputs.extra-snaps }}
+          PURGE_DOCKER: ${{ inputs.purge-docker }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$PURGE_DOCKER" == "true" ]]; then
+            sudo apt-get update
+            sudo apt-get purge -y $(dpkg -l | grep -i docker | awk '{print $2}') || true
+            sudo apt-get purge -y containerd.io || true
+            sudo rm -rf /run/containerd || true
+          fi
+
+          sudo snap install concierge --classic
+
+          if [[ -n "$CONCIERGE_CONFIG" ]]; then
+            args=(-c "$CONCIERGE_CONFIG" --juju-channel="$JUJU_CHANNEL")
+          else
+            args=(-p "$PROVIDER" --juju-channel="$JUJU_CHANNEL")
+          fi
+          if [[ -n "$EXTRA_SNAPS" ]]; then
+            args+=(--extra-snaps="$EXTRA_SNAPS")
+          fi
+          sudo -E concierge prepare "${args[@]}"
+
+          if [[ "$PROVIDER" == "k8s" ]]; then
+            mkdir -p ~/.kube
+            sudo k8s kubectl config view --raw > ~/.kube/config
+          fi
+
+          juju version
+          juju controllers
+          snap list juju
+
+      - name: Install docker if required
+        if: ${{ inputs.install-docker }}
+        shell: bash
+        run: |
+          sudo snap install docker
+          sudo snap start docker
+
+      - name: Export extra environment
+        shell: bash
+        env:
+          EXTRA_ENV: ${{ inputs.extra-env }}
+        run: |
+          set -euo pipefail
+          while IFS= read -r key; do
+            [[ -n "$key" ]] || continue
+            value=$(jq -r --arg key "$key" '.[$key]' <<<"$EXTRA_ENV")
+            {
+              echo "${key}<<EOF"
+              printf '%s\n' "$value"
+              echo "EOF"
+            } >> "$GITHUB_ENV"
+          done < <(jq -r 'keys[]' <<<"$EXTRA_ENV")
+
+      - name: Repository setup
+        if: ${{ inputs.setup-command != '' }}
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          SETUP_COMMAND: ${{ inputs.setup-command }}
+        run: bash -euo pipefail -c "$SETUP_COMMAND"
+
+      - name: Run integration tests
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          TEST_COMMAND: ${{ matrix.command }}
+        run: |
+          set -euo pipefail
+          bash -euo pipefail -c "$TEST_COMMAND" 2>&1 | tee "$GITHUB_WORKSPACE/integration.log"
+
+      - name: Collect failure diagnostics
+        if: ${{ failure() }}
+        shell: bash
+        env:
+          PROVIDER: ${{ inputs.provider }}
+        run: |
+          mkdir -p diagnostics
+          juju version > diagnostics/juju-version.txt 2>&1 || true
+          juju controllers --format yaml > diagnostics/controllers.yaml 2>&1 || true
+          juju models --format yaml > diagnostics/models.yaml 2>&1 || true
+          if juju models --format json > diagnostics/models.json 2>&1; then
+            while IFS= read -r model; do
+              juju status -m "$model" --relations >> diagnostics/status.txt 2>&1 || true
+              juju debug-log -m "$model" --replay --no-tail >> diagnostics/juju.log 2>&1 || true
+            done < <(jq -r '.models[] | select(."short-name" != "controller") | .name' diagnostics/models.json)
+          fi
+          if [[ "$PROVIDER" == "k8s" ]]; then
+            sudo k8s kubectl get pods -A -o wide > diagnostics/pods.txt 2>&1 || true
+            sudo k8s kubectl get events -A --sort-by=.lastTimestamp > diagnostics/events.txt 2>&1 || true
+          fi
+
+      - name: Upload failure diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: juju-nightly-${{ steps.meta.outputs.artifact-key }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: |
+            integration.log
+            diagnostics/
+          retention-days: 14
+
+  report-failure:
+    needs: integration
+    if: ${{ failure() && github.event_name == 'schedule' }}
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    concurrency:
+      group: juju-nightly-report-${{ github.repository }}-${{ inputs.juju-channel }}
+      cancel-in-progress: false
+    steps:
+      - name: Open or update nightly failure issue
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ISSUE_TITLE: Nightly Juju integration failing (${{ github.repository }}, ${{ inputs.juju-channel }})
+          ISSUE_LABEL: ${{ inputs.issue-label }}
+          JUJU_CHANNEL: ${{ inputs.juju-channel }}
+          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_REF: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          marker='<!-- juju-nightly-failure -->'
+          existing=$(gh issue list -R "$GITHUB_REPOSITORY" --state open \
+            --search "\"$ISSUE_TITLE\" in:title" --json number,title,body | \
+            jq -r --arg title "$ISSUE_TITLE" --arg marker "$marker" \
+              'map(select(.title == $title and ((.body // "") | contains($marker)))) | .[0].number // empty')
+          body=$(printf '%s\n\nRun: %s\nRepository: %s\nRef: %s\nCommit: %s\nJuju channel: %s\n\nReview failed jobs and diagnostic artifacts before assigning a root cause.' \
+            "$marker" "$RUN_URL" "$GITHUB_REPOSITORY" "$SOURCE_REF" "$SOURCE_SHA" "$JUJU_CHANNEL")
+          if [[ -n "$existing" ]]; then
+            gh issue comment "$existing" -R "$GITHUB_REPOSITORY" --body "$body"
+          else
+            create_args=(-R "$GITHUB_REPOSITORY" --title "$ISSUE_TITLE" --body "$body")
+            if [[ -n "$ISSUE_LABEL" ]]; then
+              create_args+=(--label "$ISSUE_LABEL")
+            fi
+            gh issue create "${create_args[@]}"
+          fi
