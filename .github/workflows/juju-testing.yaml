@@ -1,7 +1,7 @@
 # Copyright 2026 Canonical Ltd.
 # See LICENSE file for licensing details.
 
-name: Juju nightly integration
+name: Juju integration testing
 
 on:
   workflow_call:
@@ -60,8 +60,8 @@ on:
         default: false
         required: false
         type: boolean
-      issue-label:
-        description: Label for the scheduled-failure issue. The label must already exist. Empty skips labeling.
+      issue-labels:
+        description: Comma-separated labels for the scheduled-failure issue. Each label must already exist. Empty skips labeling.
         default: ""
         required: false
         type: string
@@ -186,6 +186,7 @@ jobs:
           TEST_COMMAND: ${{ matrix.command }}
         run: |
           set -euo pipefail
+          printf '%s\n' "$TEST_COMMAND" > "$GITHUB_WORKSPACE/test-command.txt"
           bash -euo pipefail -c "$TEST_COMMAND" 2>&1 | tee "$GITHUB_WORKSPACE/integration.log"
 
       - name: Collect failure diagnostics
@@ -193,27 +194,82 @@ jobs:
         shell: bash
         env:
           PROVIDER: ${{ inputs.provider }}
+          JUJU_CHANNEL: ${{ inputs.juju-channel }}
         run: |
           mkdir -p diagnostics
+          command_text=$(cat "$GITHUB_WORKSPACE/test-command.txt" 2>/dev/null || echo "unknown")
+          logfile="$GITHUB_WORKSPACE/integration.log"
+          {
+            printf 'Command: %s\n\n' "$command_text"
+            if [[ -f "$logfile" ]]; then
+              echo "Error lines:"
+              grep -E -i 'error|traceback|exception|failed|failure|blocked|hook failed' "$logfile" | tail -n 60 || true
+              echo
+              echo "Log tail:"
+              tail -n 80 "$logfile" || true
+            else
+              echo "integration.log was not written. The job failed before the test command produced output."
+            fi
+          } > diagnostics/failure-summary.txt
+
+          error_line=""
+          if [[ -f "$logfile" ]]; then
+            clean_log=$(sed -E 's/\x1b\[[0-9;]*m//g' "$logfile")
+            error_line=$(grep -E '^(FAILED|ERROR) ' <<<"$clean_log" | head -n 1 || true)
+            if [[ -z "$error_line" ]]; then
+              error_line=$(grep -E '[A-Za-z]+(Error|Exception)\b|^error:|ERROR:' <<<"$clean_log" | tail -n 1 || true)
+            fi
+          fi
+          if [[ -z "$error_line" ]]; then
+            error_line="No error line found in the test output"
+          fi
+          error_line=${error_line:0:300}
+          normalized=$(sed -E '
+            s/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/<uuid>/g
+            s/\b[0-9a-f]{7,}\b/<hex>/g
+            s/[0-9]+/N/g
+            s/[[:space:]]+/ /g
+          ' <<<"$error_line")
+          printf '%s\n' "$command_text" > diagnostics/command.txt
+          printf '%s\n' "$error_line" > diagnostics/error.txt
+          printf '%s\n%s\n%s\n' "$JUJU_CHANNEL" "$command_text" "$normalized" | sha256sum | cut -c1-12 > diagnostics/signature.txt
           juju version > diagnostics/juju-version.txt 2>&1 || true
           juju controllers --format yaml > diagnostics/controllers.yaml 2>&1 || true
           juju models --format yaml > diagnostics/models.yaml 2>&1 || true
           if juju models --format json > diagnostics/models.json 2>&1; then
+            {
+              echo
+              echo "Applications not active:"
+            } >> diagnostics/failure-summary.txt
             while IFS= read -r model; do
               juju status -m "$model" --relations >> diagnostics/status.txt 2>&1 || true
+              juju status -m "$model" --format json > diagnostics/status.json 2>/dev/null || true
+              if [[ -s diagnostics/status.json ]]; then
+                jq -r --arg model "$model" '
+                  .applications // {} | to_entries[]
+                  | (.value["application-status"].current // "") as $status
+                  | select($status != "" and $status != "active")
+                  | "\($model)/\(.key): \($status) \(.value["application-status"].message // "")"
+                ' diagnostics/status.json >> diagnostics/failure-summary.txt || true
+              fi
               juju debug-log -m "$model" --replay --no-tail >> diagnostics/juju.log 2>&1 || true
             done < <(jq -r '.models[] | select(."short-name" != "controller") | .name' diagnostics/models.json)
           fi
           if [[ "$PROVIDER" == "k8s" ]]; then
             sudo k8s kubectl get pods -A -o wide > diagnostics/pods.txt 2>&1 || true
             sudo k8s kubectl get events -A --sort-by=.lastTimestamp > diagnostics/events.txt 2>&1 || true
+            {
+              echo
+              echo "Pods not running:"
+              awk 'NR == 1 || $4 != "Running"' diagnostics/pods.txt | head -n 40
+            } >> diagnostics/failure-summary.txt || true
           fi
 
       - name: Upload failure diagnostics
         if: ${{ failure() }}
         uses: actions/upload-artifact@v4
         with:
-          name: juju-nightly-${{ steps.meta.outputs.artifact-key }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          name: juju-testing-diagnostics-${{ steps.meta.outputs.artifact-key }}-${{ strategy.job-index }}-${{ github.run_attempt }}
           path: |
             integration.log
             diagnostics/
@@ -224,36 +280,201 @@ jobs:
     if: ${{ failure() && github.event_name == 'schedule' }}
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       issues: write
     concurrency:
-      group: juju-nightly-report-${{ github.repository }}-${{ inputs.juju-channel }}
+      group: juju-testing-report-${{ github.repository }}-${{ inputs.juju-channel }}
       cancel-in-progress: false
     steps:
-      - name: Open or update nightly failure issue
+      - name: Download failure diagnostics
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: juju-testing-diagnostics-*
+          path: failure-artifacts
+
+      - name: Load issue ledger from earlier runs
+        id: ledger
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JUJU_CHANNEL: ${{ inputs.juju-channel }}
+        run: |
+          set -euo pipefail
+          name="juju-testing-issues-${JUJU_CHANNEL//\//-}"
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+          echo '{}' > ledger.json
+          if ! id=$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=${name}&per_page=20" \
+              --jq '[.artifacts[] | select(.expired | not)] | sort_by(.created_at) | last | .id // empty'); then
+            echo "::warning::Could not list earlier issue ledgers. Issues are matched against this repository only, and the ledger is not overwritten."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ -n "$id" ]]; then
+            if ! { gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${id}/zip" > ledger.zip \
+                && unzip -o -q ledger.zip ledger.json \
+                && jq -e 'type == "object"' ledger.json > /dev/null; }; then
+              echo "::warning::Could not read issue ledger artifact ${id}. Issues are matched against this repository only, and the ledger is not overwritten."
+              echo '{}' > ledger.json
+              echo "ok=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+          echo "Loaded $(jq 'length' ledger.json) ledger entries from artifact ${id:-none}"
+          echo "ok=true" >> "$GITHUB_OUTPUT"
+
+      - name: Open or update failure issues
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          ISSUE_TITLE: Nightly Juju integration failing (${{ github.repository }}, ${{ inputs.juju-channel }})
-          ISSUE_LABEL: ${{ inputs.issue-label }}
+          ISSUE_LABELS: ${{ inputs.issue-labels }}
           JUJU_CHANNEL: ${{ inputs.juju-channel }}
           SOURCE_SHA: ${{ github.sha }}
           SOURCE_REF: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          marker='<!-- juju-nightly-failure -->'
-          existing=$(gh issue list -R "$GITHUB_REPOSITORY" --state open \
-            --search "\"$ISSUE_TITLE\" in:title" --json number,title,body | \
-            jq -r --arg title "$ISSUE_TITLE" --arg marker "$marker" \
-              'map(select(.title == $title and ((.body // "") | contains($marker)))) | .[0].number // empty')
-          body=$(printf '%s\n\nRun: %s\nRepository: %s\nRef: %s\nCommit: %s\nJuju channel: %s\n\nReview failed jobs and diagnostic artifacts before assigning a root cause.' \
-            "$marker" "$RUN_URL" "$GITHUB_REPOSITORY" "$SOURCE_REF" "$SOURCE_SHA" "$JUJU_CHANNEL")
-          if [[ -n "$existing" ]]; then
-            gh issue comment "$existing" -R "$GITHUB_REPOSITORY" --body "$body"
-          else
-            create_args=(-R "$GITHUB_REPOSITORY" --title "$ISSUE_TITLE" --body "$body")
-            if [[ -n "$ISSUE_LABEL" ]]; then
-              create_args+=(--label "$ISSUE_LABEL")
+          shopt -s nullglob
+          groups=$(mktemp -d)
+
+          for summary in failure-artifacts/*/diagnostics/failure-summary.txt; do
+            dir=$(dirname "$summary")
+            sig=$(cat "$dir/signature.txt" 2>/dev/null || echo unknown)
+            group="$groups/$sig"
+            mkdir -p "$group"
+            command_text=$(cat "$dir/command.txt" 2>/dev/null || echo unknown)
+            [[ -f "$group/error.txt" ]] || cp "$dir/error.txt" "$group/error.txt" 2>/dev/null || true
+            printf '%s\n' "$command_text" >> "$group/commands.txt"
+            if [[ ! -f "$group/excerpt.md" || $(wc -c < "$group/excerpt.md") -lt 40000 ]]; then
+              {
+                printf '\n### %s\n\n~~~~text\n' "$command_text"
+                head -c 12000 "$summary"
+                printf '\n~~~~\n'
+              } >> "$group/excerpt.md"
             fi
-            gh issue create "${create_args[@]}"
+          done
+
+          group_dirs=("$groups"/*/)
+          if (( ${#group_dirs[@]} == 0 )); then
+            sig=$(printf '%s\nno-diagnostics\n' "$JUJU_CHANNEL" | sha256sum | cut -c1-12)
+            mkdir -p "$groups/$sig"
+            echo "No diagnostics were uploaded" > "$groups/$sig/error.txt"
+            echo "unknown" > "$groups/$sig/commands.txt"
+            echo "The integration job failed or timed out before diagnostics were collected. Check the failed jobs in the run." > "$groups/$sig/excerpt.md"
+            group_dirs=("$groups/$sig/")
           fi
+
+          note() {
+            printf '%s\n' "$1"
+            printf -- '- %s\n' "$1" >> "$GITHUB_STEP_SUMMARY"
+          }
+          record() {
+            jq --arg sig "$1" --arg url "$2" --arg repo "$3" --argjson number "$4" \
+              '.[$sig] = {url: $url, repo: $repo, number: $number}' ledger.json > ledger.tmp
+            mv ledger.tmp ledger.json
+          }
+
+          open_issues=$(gh issue list -R "$GITHUB_REPOSITORY" --state open --limit 1000 --json number,body)
+
+          for group in "${group_dirs[@]}"; do
+            group=${group%/}
+            sig=$(basename "$group")
+            marker="<!-- juju-testing-signature:${sig} -->"
+            error_line=$(cat "$group/error.txt" 2>/dev/null || echo "unknown error")
+            commands=$(sort -u "$group/commands.txt")
+            command_list=$(sed 's/^/- /' <<<"$commands")
+            recurrence=$(printf 'Failed again with the same error.\n\nRun: %s\nCommit: %s\nFailed commands:\n%s\n' \
+              "$RUN_URL" "$SOURCE_SHA" "$command_list")
+
+            target=""
+            reopen=""
+            previous=""
+            entry=$(jq -c --arg sig "$sig" '.[$sig] // empty' ledger.json)
+            if [[ -n "$entry" ]]; then
+              recorded_repo=$(jq -r '.repo' <<<"$entry")
+              recorded_number=$(jq -r '.number' <<<"$entry")
+              if issue=$(gh api "repos/${recorded_repo}/issues/${recorded_number}" 2> lookup.err); then
+                state=$(jq -r '.state' <<<"$issue")
+                url=$(jq -r '.html_url' <<<"$issue")
+                number=$(jq -r '.number' <<<"$issue")
+                current_repo=$(jq -r '.repository_url | sub("^.*/repos/"; "")' <<<"$issue")
+                if [[ "$current_repo" == "$GITHUB_REPOSITORY" ]]; then
+                  target=$number
+                  [[ "$state" == "closed" ]] && reopen=yes
+                elif [[ "$state" == "open" ]]; then
+                  note "Signature ${sig} is already tracked in ${url}. No issue opened."
+                  record "$sig" "$url" "$current_repo" "$number"
+                  continue
+                else
+                  previous=$url
+                fi
+              elif grep -q 'HTTP 410' lookup.err; then
+                note "Signature ${sig} was tracked in ${recorded_repo}#${recorded_number}, which was deleted. Opening a new issue."
+              elif grep -q 'HTTP 404' lookup.err; then
+                note "Signature ${sig} was tracked in ${recorded_repo}#${recorded_number}, which this repository can no longer read. It was likely transferred to a private repository. No issue opened."
+                continue
+              else
+                cat lookup.err >&2
+                exit 1
+              fi
+            fi
+
+            if [[ -z "$target" && -z "$previous" ]]; then
+              target=$(jq -r --arg marker "$marker" \
+                'map(select((.body // "") | contains($marker))) | sort_by(.number) | .[0].number // empty' <<<"$open_issues")
+              if [[ -z "$target" ]]; then
+                target=$(gh issue list -R "$GITHUB_REPOSITORY" --state closed --limit 20 \
+                  --search "\"${sig}\" in:body" --json number,body | \
+                  jq -r --arg marker "$marker" \
+                    'map(select((.body // "") | contains($marker))) | sort_by(.number) | last | .number // empty')
+                [[ -n "$target" ]] && reopen=yes
+              fi
+            fi
+
+            if [[ -n "$target" ]]; then
+              if [[ -n "$reopen" ]]; then
+                gh issue reopen "$target" -R "$GITHUB_REPOSITORY"
+              fi
+              gh issue comment "$target" -R "$GITHUB_REPOSITORY" --body "$recurrence"
+              url=$(gh issue view "$target" -R "$GITHUB_REPOSITORY" --json url --jq '.url')
+              record "$sig" "$url" "$GITHUB_REPOSITORY" "$target"
+              note "Signature ${sig} recurred. Commented on ${url}."
+              continue
+            fi
+
+            title="Juju integration tests failed on ${GITHUB_REPOSITORY#*/} (Juju ${JUJU_CHANNEL})"
+            title=${title:0:240}
+            {
+              printf '%s\n\n' "$marker"
+              printf 'Failure signature: %s\n\n' "$sig"
+              printf 'Run: %s\nRef: %s\nCommit: %s\nJuju channel: %s\n\n' "$RUN_URL" "$SOURCE_REF" "$SOURCE_SHA" "$JUJU_CHANNEL"
+              if [[ -n "$previous" ]]; then
+                printf 'Previously tracked in %s, which is closed.\n\n' "$previous"
+              fi
+              printf 'Error:\n\n~~~~text\n%s\n~~~~\n\n' "$error_line"
+              printf 'Failed commands:\n%s\n\n' "$command_list"
+              printf '## Failure summary\n'
+              cat "$group/excerpt.md"
+              printf '\nFull Juju debug logs, status, and pod events are in the run artifacts. Later runs that fail with the same error comment here instead of opening a new issue, including after this issue is transferred.\n'
+            } > "$group/body.md"
+
+            create_args=(-R "$GITHUB_REPOSITORY" --title "$title" --body-file "$group/body.md")
+            IFS=',' read -ra labels <<<"$ISSUE_LABELS"
+            for label in "${labels[@]}"; do
+              label=$(xargs <<<"$label")
+              if [[ -n "$label" ]]; then
+                create_args+=(--label "$label")
+              fi
+            done
+            url=$(gh issue create "${create_args[@]}" | tail -n 1)
+            record "$sig" "$url" "$GITHUB_REPOSITORY" "${url##*/}"
+            note "Signature ${sig} is new. Opened ${url}."
+          done
+
+      - name: Save issue ledger
+        if: ${{ always() && steps.ledger.outputs.ok == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.ledger.outputs.name }}
+          path: ledger.json
+          retention-days: 90
