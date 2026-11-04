@@ -65,6 +65,11 @@ on:
         default: ""
         required: false
         type: string
+      report-manual-runs:
+        description: Also open or update failure issues for workflow_dispatch runs. Scheduled runs always report.
+        default: false
+        required: false
+        type: boolean
       runner:
         description: Runner label for the integration jobs.
         default: self-hosted-linux-amd64-noble-medium
@@ -75,6 +80,10 @@ on:
         default: 90
         required: false
         type: number
+    secrets:
+      ISSUE_LOOKUP_TOKEN:
+        description: Token that can read issues in the repositories failure issues get transferred to. Used only to find existing issues. Defaults to the workflow token, which can read public repositories only.
+        required: false
 
 permissions:
   contents: read
@@ -277,7 +286,7 @@ jobs:
 
   report-failure:
     needs: integration
-    if: ${{ failure() && github.event_name == 'schedule' }}
+    if: ${{ failure() && (github.event_name == 'schedule' || (inputs.report-manual-runs && github.event_name == 'workflow_dispatch')) }}
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -327,6 +336,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          LOOKUP_TOKEN: ${{ secrets.ISSUE_LOOKUP_TOKEN || github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           ISSUE_LABELS: ${{ inputs.issue-labels }}
           JUJU_CHANNEL: ${{ inputs.juju-channel }}
@@ -375,6 +385,12 @@ jobs:
           }
 
           open_issues=$(gh issue list -R "$GITHUB_REPOSITORY" --state open --limit 1000 --json number,body)
+          closed_here=$(gh issue list -R "$GITHUB_REPOSITORY" --state closed --limit 200 --json number,body,url)
+
+          skip_closed() {
+            note "Signature $1 already reported in closed $2. No issue opened."
+            record "$1" "$2" "$3" "$4"
+          }
 
           for group in "${group_dirs[@]}"; do
             group=${group%/}
@@ -383,30 +399,29 @@ jobs:
             error_line=$(cat "$group/error.txt" 2>/dev/null || echo "unknown error")
             commands=$(sort -u "$group/commands.txt")
             command_list=$(sed 's/^/- /' <<<"$commands")
+            note "Matching signature ${sig}; command: ${commands//$'\n'/ | }; error: ${error_line}"
             recurrence=$(printf 'Failed again with the same error.\n\nRun: %s\nCommit: %s\nFailed commands:\n%s\n' \
               "$RUN_URL" "$SOURCE_SHA" "$command_list")
 
             target=""
-            reopen=""
-            previous=""
             entry=$(jq -c --arg sig "$sig" '.[$sig] // empty' ledger.json)
             if [[ -n "$entry" ]]; then
               recorded_repo=$(jq -r '.repo' <<<"$entry")
               recorded_number=$(jq -r '.number' <<<"$entry")
-              if issue=$(gh api "repos/${recorded_repo}/issues/${recorded_number}" 2> lookup.err); then
+              if issue=$(GH_TOKEN="$LOOKUP_TOKEN" gh api "repos/${recorded_repo}/issues/${recorded_number}" 2> lookup.err); then
                 state=$(jq -r '.state' <<<"$issue")
                 url=$(jq -r '.html_url' <<<"$issue")
                 number=$(jq -r '.number' <<<"$issue")
                 current_repo=$(jq -r '.repository_url | sub("^.*/repos/"; "")' <<<"$issue")
-                if [[ "$current_repo" == "$GITHUB_REPOSITORY" ]]; then
+                if [[ "$current_repo" == "$GITHUB_REPOSITORY" && "$state" == "open" ]]; then
                   target=$number
-                  [[ "$state" == "closed" ]] && reopen=yes
                 elif [[ "$state" == "open" ]]; then
                   note "Signature ${sig} is already tracked in ${url}. No issue opened."
                   record "$sig" "$url" "$current_repo" "$number"
                   continue
                 else
-                  previous=$url
+                  skip_closed "$sig" "$url" "$current_repo" "$number"
+                  continue
                 fi
               elif grep -q 'HTTP 410' lookup.err; then
                 note "Signature ${sig} was tracked in ${recorded_repo}#${recorded_number}, which was deleted. Opening a new issue."
@@ -419,22 +434,46 @@ jobs:
               fi
             fi
 
-            if [[ -z "$target" && -z "$previous" ]]; then
+            if [[ -z "$target" ]]; then
               target=$(jq -r --arg marker "$marker" \
                 'map(select((.body // "") | contains($marker))) | sort_by(.number) | .[0].number // empty' <<<"$open_issues")
               if [[ -z "$target" ]]; then
-                target=$(gh issue list -R "$GITHUB_REPOSITORY" --state closed --limit 20 \
-                  --search "\"${sig}\" in:body" --json number,body | \
-                  jq -r --arg marker "$marker" \
-                    'map(select((.body // "") | contains($marker))) | sort_by(.number) | last | .number // empty')
-                [[ -n "$target" ]] && reopen=yes
+                closed_match=$(jq -c --arg marker "$marker" \
+                  'map(select((.body // "") | contains($marker))) | sort_by(.number) | last // empty' <<<"$closed_here")
+                if [[ -n "$closed_match" ]]; then
+                  skip_closed "$sig" "$(jq -r '.url' <<<"$closed_match")" "$GITHUB_REPOSITORY" "$(jq -r '.number' <<<"$closed_match")"
+                  continue
+                fi
+                if ! found=$(GH_TOKEN="$LOOKUP_TOKEN" gh search issues "$sig" --owner "$GITHUB_REPOSITORY_OWNER" \
+                    --limit 30 --json number,state,url,repository,body,updatedAt 2> search.err); then
+                  echo "::warning::Searching ${GITHUB_REPOSITORY_OWNER} for signature ${sig} failed: $(cat search.err)"
+                  found='[]'
+                fi
+                open_match=$(jq -c --arg marker "$marker" --arg repo "$GITHUB_REPOSITORY" '
+                  map(select(((.body // "") | contains($marker)) and (.state | ascii_downcase) == "open"))
+                  | sort_by(.repository.nameWithOwner != $repo) | .[0] // empty' <<<"$found")
+                transferred_closed=$(jq -c --arg marker "$marker" --arg repo "$GITHUB_REPOSITORY" '
+                  map(select(((.body // "") | contains($marker)) and (.state | ascii_downcase) != "open" and .repository.nameWithOwner != $repo))
+                  | sort_by(.updatedAt) | last // empty' <<<"$found")
+                if [[ -n "$open_match" ]]; then
+                  match_repo=$(jq -r '.repository.nameWithOwner' <<<"$open_match")
+                  match_number=$(jq -r '.number' <<<"$open_match")
+                  match_url=$(jq -r '.url' <<<"$open_match")
+                  if [[ "$match_repo" == "$GITHUB_REPOSITORY" ]]; then
+                    target=$match_number
+                  else
+                    note "Signature ${sig} is already tracked in ${match_url}. No issue opened."
+                    record "$sig" "$match_url" "$match_repo" "$match_number"
+                    continue
+                  fi
+                elif [[ -n "$transferred_closed" ]]; then
+                  skip_closed "$sig" "$(jq -r '.url' <<<"$transferred_closed")" "$(jq -r '.repository.nameWithOwner' <<<"$transferred_closed")" "$(jq -r '.number' <<<"$transferred_closed")"
+                  continue
+                fi
               fi
             fi
 
             if [[ -n "$target" ]]; then
-              if [[ -n "$reopen" ]]; then
-                gh issue reopen "$target" -R "$GITHUB_REPOSITORY"
-              fi
               gh issue comment "$target" -R "$GITHUB_REPOSITORY" --body "$recurrence"
               url=$(gh issue view "$target" -R "$GITHUB_REPOSITORY" --json url --jq '.url')
               record "$sig" "$url" "$GITHUB_REPOSITORY" "$target"
@@ -442,15 +481,36 @@ jobs:
               continue
             fi
 
-            title="Juju integration tests failed on ${GITHUB_REPOSITORY#*/} (Juju ${JUJU_CHANNEL})"
-            title=${title:0:240}
+            first_command=$(head -n 1 <<<"$commands")
+            cmd_file=$(grep -Eo 'tests/[^[:space:]]+\.py' <<<"$first_command" | head -n 1 || true)
+            pytest_re='^(FAILED|ERROR) ([^ ]+)( - (.*))?$'
+            if [[ "$error_line" =~ $pytest_re ]]; then
+              test_id=${BASH_REMATCH[2]}
+              test_path=${test_id%%::*}
+              subject="${test_path##*/}${test_id#"$test_path"}"
+              short=${BASH_REMATCH[4]:-${BASH_REMATCH[1],,}}
+            elif [[ -n "$cmd_file" ]]; then
+              subject=${cmd_file##*/}
+              short=$error_line
+            else
+              subject=$first_command
+              short=$error_line
+            fi
+            if (( ${#short} > 100 )); then
+              short="${short:0:97}..."
+            fi
+            prefix="Juju integration tests failed on ${GITHUB_REPOSITORY#*/} (Juju ${JUJU_CHANNEL}): "
+            suffix=" [${sig}]"
+            middle="${subject} - ${short}"
+            room=$(( 250 - ${#prefix} - ${#suffix} ))
+            if (( ${#middle} > room )); then
+              middle="${middle:0:room-3}..."
+            fi
+            title="${prefix}${middle}${suffix}"
             {
               printf '%s\n\n' "$marker"
               printf 'Failure signature: %s\n\n' "$sig"
               printf 'Run: %s\nRef: %s\nCommit: %s\nJuju channel: %s\n\n' "$RUN_URL" "$SOURCE_REF" "$SOURCE_SHA" "$JUJU_CHANNEL"
-              if [[ -n "$previous" ]]; then
-                printf 'Previously tracked in %s, which is closed.\n\n' "$previous"
-              fi
               printf 'Error:\n\n~~~~text\n%s\n~~~~\n\n' "$error_line"
               printf 'Failed commands:\n%s\n\n' "$command_list"
               printf '## Failure summary\n'
