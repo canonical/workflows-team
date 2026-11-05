@@ -224,7 +224,13 @@ jobs:
           error_line=""
           if [[ -f "$logfile" ]]; then
             clean_log=$(sed -E 's/\x1b\[[0-9;]*m//g' "$logfile")
-            error_line=$(grep -E '^(FAILED|ERROR) ' <<<"$clean_log" | head -n 1 || true)
+            # Just recipes print "ERROR model ... not found" from juju destroy-model
+            # before pytest runs. Only the short test summary is a real test failure.
+            error_line=$(awk '
+              /^[=]+[[:space:]]+short test summary info[[:space:]]+[=]+/ { in_summary=1; next }
+              in_summary && /^[=]+/ { exit }
+              in_summary && /^(FAILED|ERROR) / { print; exit }
+            ' <<<"$clean_log")
             if [[ -z "$error_line" ]]; then
               error_line=$(grep -E '[A-Za-z]+(Error|Exception)\b|^error:|ERROR:' <<<"$clean_log" | tail -n 1 || true)
             fi
