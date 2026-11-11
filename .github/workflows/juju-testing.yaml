@@ -224,13 +224,18 @@ jobs:
           error_line=""
           if [[ -f "$logfile" ]]; then
             clean_log=$(sed -E 's/\x1b\[[0-9;]*m//g' "$logfile")
-            # Just recipes print "ERROR model ... not found" from juju destroy-model
-            # before pytest runs. Only the short test summary is a real test failure.
-            error_line=$(awk '
-              /^[=]+[[:space:]]+short test summary info[[:space:]]+[=]+/ { in_summary=1; next }
-              in_summary && /^[=]+/ { exit }
-              in_summary && /^(FAILED|ERROR) / { print; exit }
-            ' <<<"$clean_log")
+            # Pytest's short summary is the failure to track. Earlier juju ERROR
+            # lines (cleanup, model not found) would make every failure look the same.
+            summary=$(awk '/short test summary info/{p=1} p' <<<"$clean_log")
+            if [[ -n "$summary" ]]; then
+              error_line=$(grep -E '^(FAILED|ERROR) ' <<<"$summary" | head -n 1 || true)
+            fi
+            if [[ -z "$error_line" ]]; then
+              error_line=$(grep -E '^FAILED ' <<<"$clean_log" | head -n 1 || true)
+            fi
+            if [[ -z "$error_line" ]]; then
+              error_line=$(grep -E '^ERROR ' <<<"$clean_log" | head -n 1 || true)
+            fi
             if [[ -z "$error_line" ]]; then
               error_line=$(grep -E '[A-Za-z]+(Error|Exception)\b|^error:|ERROR:' <<<"$clean_log" | tail -n 1 || true)
             fi
@@ -240,8 +245,8 @@ jobs:
           fi
           error_line=${error_line:0:300}
           normalized=$(sed -E '
-            s/[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}/<uuid>/g
-            s/\b[0-9A-Fa-f]{7,}\b/<hex>/g
+            s/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/<uuid>/g
+            s/\b[0-9a-f]{7,}\b/<hex>/g
             s/[0-9]+/N/g
             s/[[:space:]]+/ /g
           ' <<<"$error_line")
@@ -288,7 +293,7 @@ jobs:
           path: |
             integration.log
             diagnostics/
-          retention-days: 14
+          retention-days: 30
 
   report-failure:
     needs: integration
@@ -348,6 +353,7 @@ jobs:
           JUJU_CHANNEL: ${{ inputs.juju-channel }}
           SOURCE_SHA: ${{ github.sha }}
           SOURCE_REF: ${{ github.ref_name }}
+          UPSTREAM_REPO: juju/juju
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -390,7 +396,7 @@ jobs:
             mv ledger.tmp ledger.json
           }
 
-          open_issues=$(gh issue list -R "$GITHUB_REPOSITORY" --state open --limit 1000 --json number,body)
+          open_issues=$(gh issue list -R "$GITHUB_REPOSITORY" --state open --limit 1000 --json number,body,url)
           closed_here=$(gh issue list -R "$GITHUB_REPOSITORY" --state closed --limit 200 --json number,body,url)
 
           skip_closed() {
@@ -398,95 +404,51 @@ jobs:
             record "$1" "$2" "$3" "$4"
           }
 
-          for group in "${group_dirs[@]}"; do
-            group=${group%/}
-            sig=$(basename "$group")
-            marker="<!-- juju-testing-signature:${sig} -->"
-            error_line=$(cat "$group/error.txt" 2>/dev/null || echo "unknown error")
-            commands=$(sort -u "$group/commands.txt")
-            command_list=$(sed 's/^/- /' <<<"$commands")
-            note "Matching signature ${sig}; command: ${commands//$'\n'/ | }; error: ${error_line}"
-            recurrence=$(printf 'Failed again with the same error.\n\nRun: %s\nCommit: %s\nFailed commands:\n%s\n' \
-              "$RUN_URL" "$SOURCE_SHA" "$command_list")
+          UPSTREAM_REPO=${UPSTREAM_REPO:-juju/juju}
 
-            target=""
-            entry=$(jq -c --arg sig "$sig" '.[$sig] // empty' ledger.json)
-            if [[ -n "$entry" ]]; then
-              recorded_repo=$(jq -r '.repo' <<<"$entry")
-              recorded_number=$(jq -r '.number' <<<"$entry")
-              if issue=$(GH_TOKEN="$LOOKUP_TOKEN" gh api "repos/${recorded_repo}/issues/${recorded_number}" 2> lookup.err); then
-                state=$(jq -r '.state' <<<"$issue")
-                url=$(jq -r '.html_url' <<<"$issue")
-                number=$(jq -r '.number' <<<"$issue")
-                current_repo=$(jq -r '.repository_url | sub("^.*/repos/"; "")' <<<"$issue")
-                if [[ "$current_repo" == "$GITHUB_REPOSITORY" && "$state" == "open" ]]; then
-                  target=$number
-                elif [[ "$state" == "open" ]]; then
-                  note "Signature ${sig} is already tracked in ${url}. No issue opened."
-                  record "$sig" "$url" "$current_repo" "$number"
-                  continue
-                else
-                  skip_closed "$sig" "$url" "$current_repo" "$number"
-                  continue
-                fi
-              elif grep -q 'HTTP 410' lookup.err; then
-                note "Signature ${sig} was tracked in ${recorded_repo}#${recorded_number}, which was deleted. Opening a new issue."
-              elif grep -q 'HTTP 404' lookup.err; then
-                note "Signature ${sig} was tracked in ${recorded_repo}#${recorded_number}, which this repository can no longer read. It was likely transferred to a private repository. No issue opened."
-                continue
-              else
-                cat lookup.err >&2
-                exit 1
-              fi
+          # Current tracker only. Ignore "Previous local issue:" / "Closed upstream:" history.
+          current_issue_text() {
+            grep -Eiv '^[[:space:]]*(Previous( local issue)?|Closed[- ]upstream):' <<<"$1" || true
+          }
+
+          # Body or comments: Upstream: URL, juju/juju#N, or "Juju issue: N".
+          upstream_from_text() {
+            local text owner=${UPSTREAM_REPO%%/*} name=${UPSTREAM_REPO#*/} url n
+            text=$(current_issue_text "$1")
+            url=$(grep -Ei '^[[:space:]]*Upstream:[[:space:]]*https://github.com/[^[:space:]]+/issues/[0-9]+' <<<"$text" \
+              | grep -Eo 'https://github.com/[^[:space:]]+/issues/[0-9]+' | head -n 1 || true)
+            if [[ -z "$url" ]]; then
+              url=$(grep -Eo "https://github.com/${owner}/${name}/issues/[0-9]+" <<<"$text" | head -n 1 || true)
             fi
-
-            if [[ -z "$target" ]]; then
-              target=$(jq -r --arg marker "$marker" \
-                'map(select((.body // "") | contains($marker))) | sort_by(.number) | .[0].number // empty' <<<"$open_issues")
-              if [[ -z "$target" ]]; then
-                closed_match=$(jq -c --arg marker "$marker" \
-                  'map(select((.body // "") | contains($marker))) | sort_by(.number) | last // empty' <<<"$closed_here")
-                if [[ -n "$closed_match" ]]; then
-                  skip_closed "$sig" "$(jq -r '.url' <<<"$closed_match")" "$GITHUB_REPOSITORY" "$(jq -r '.number' <<<"$closed_match")"
-                  continue
-                fi
-                if ! found=$(GH_TOKEN="$LOOKUP_TOKEN" gh search issues "$sig" --owner "$GITHUB_REPOSITORY_OWNER" \
-                    --limit 30 --json number,state,url,repository,body,updatedAt 2> search.err); then
-                  echo "::warning::Searching ${GITHUB_REPOSITORY_OWNER} for signature ${sig} failed: $(cat search.err)"
-                  found='[]'
-                fi
-                open_match=$(jq -c --arg marker "$marker" --arg repo "$GITHUB_REPOSITORY" '
-                  map(select(((.body // "") | contains($marker)) and (.state | ascii_downcase) == "open"))
-                  | sort_by(.repository.nameWithOwner != $repo) | .[0] // empty' <<<"$found")
-                transferred_closed=$(jq -c --arg marker "$marker" --arg repo "$GITHUB_REPOSITORY" '
-                  map(select(((.body // "") | contains($marker)) and (.state | ascii_downcase) != "open" and .repository.nameWithOwner != $repo))
-                  | sort_by(.updatedAt) | last // empty' <<<"$found")
-                if [[ -n "$open_match" ]]; then
-                  match_repo=$(jq -r '.repository.nameWithOwner' <<<"$open_match")
-                  match_number=$(jq -r '.number' <<<"$open_match")
-                  match_url=$(jq -r '.url' <<<"$open_match")
-                  if [[ "$match_repo" == "$GITHUB_REPOSITORY" ]]; then
-                    target=$match_number
-                  else
-                    note "Signature ${sig} is already tracked in ${match_url}. No issue opened."
-                    record "$sig" "$match_url" "$match_repo" "$match_number"
-                    continue
-                  fi
-                elif [[ -n "$transferred_closed" ]]; then
-                  skip_closed "$sig" "$(jq -r '.url' <<<"$transferred_closed")" "$(jq -r '.repository.nameWithOwner' <<<"$transferred_closed")" "$(jq -r '.number' <<<"$transferred_closed")"
-                  continue
-                fi
-              fi
+            if [[ -z "$url" ]]; then
+              url=$(grep -Eo 'https://github.com/[^[:space:]]+/issues/[0-9]+' <<<"$text" | head -n 1 || true)
             fi
-
-            if [[ -n "$target" ]]; then
-              gh issue comment "$target" -R "$GITHUB_REPOSITORY" --body "$recurrence"
-              url=$(gh issue view "$target" -R "$GITHUB_REPOSITORY" --json url --jq '.url')
-              record "$sig" "$url" "$GITHUB_REPOSITORY" "$target"
-              note "Signature ${sig} recurred. Commented on ${url}."
-              continue
+            if [[ -z "$url" ]]; then
+              n=$(grep -Eo "${owner}/${name}#[0-9]+" <<<"$text" | head -n 1 | grep -Eo '[0-9]+$' || true)
+              [[ -n "$n" ]] && url="https://github.com/${owner}/${name}/issues/${n}"
             fi
+            if [[ -z "$url" ]]; then
+              n=$(grep -Ei 'juju[[:space:]]*issue[: #]+[0-9]+' <<<"$text" | grep -Eo '[0-9]+' | tail -n 1 || true)
+              [[ -n "$n" ]] && url="https://github.com/${owner}/${name}/issues/${n}"
+            fi
+            printf '%s' "$url"
+          }
 
+          local_comments() {
+            GH_TOKEN="$LOOKUP_TOKEN" gh api --paginate "repos/${1}/issues/${2}/comments" --jq '.[].body' 2>/dev/null || true
+          }
+
+          comment_on_local() {
+            local number=$1
+            local body=$2
+            if [[ "$3" == "$GITHUB_REPOSITORY" ]]; then
+              gh issue comment "$number" -R "$GITHUB_REPOSITORY" --body "$body"
+            fi
+          }
+
+          create_local_issue() {
+            local previous=$1 closed_up=$2
+            local first_command cmd_file pytest_re test_id test_path subject short prefix suffix middle room title create_args label url labels
             first_command=$(head -n 1 <<<"$commands")
             cmd_file=$(grep -Eo 'tests/[^[:space:]]+\.py' <<<"$first_command" | head -n 1 || true)
             pytest_re='^(FAILED|ERROR) ([^ ]+)( - (.*))?$'
@@ -515,15 +477,20 @@ jobs:
             title="${prefix}${middle}${suffix}"
             {
               printf '%s\n\n' "$marker"
+              if [[ -n "$previous" || -n "$closed_up" ]]; then
+                printf 'Needs triaging: report a new upstream bug on %s.\n\n' "$UPSTREAM_REPO"
+                [[ -n "$previous" ]] && printf 'Previous local issue: %s\n' "$previous"
+                [[ -n "$closed_up" ]] && printf 'Closed upstream: %s\n' "$closed_up"
+                printf '\n'
+              fi
               printf 'Failure signature: %s\n\n' "$sig"
               printf 'Run: %s\nRef: %s\nCommit: %s\nJuju channel: %s\n\n' "$RUN_URL" "$SOURCE_REF" "$SOURCE_SHA" "$JUJU_CHANNEL"
               printf 'Error:\n\n~~~~text\n%s\n~~~~\n\n' "$error_line"
               printf 'Failed commands:\n%s\n\n' "$command_list"
               printf '## Failure summary\n'
               cat "$group/excerpt.md"
-              printf '\nFull Juju debug logs, status, and pod events are in the run artifacts. Later runs that fail with the same error comment here instead of opening a new issue, including after this issue is transferred.\n'
+              printf '\nClone this failure to %s and comment the link here as:\n\nUpstream: https://github.com/%s/issues/N\n\nLater failing runs comment here while that upstream issue is open. If it is closed and tests still fail, this issue is closed and a new local issue is opened for Jira triage. A scheduled passing run closes this issue when there is no upstream link, or when the linked upstream issue is closed.\n' "$UPSTREAM_REPO" "$UPSTREAM_REPO"
             } > "$group/body.md"
-
             create_args=(-R "$GITHUB_REPOSITORY" --title "$title" --body-file "$group/body.md")
             IFS=',' read -ra labels <<<"$ISSUE_LABELS"
             for label in "${labels[@]}"; do
@@ -532,7 +499,208 @@ jobs:
                 create_args+=(--label "$label")
               fi
             done
-            url=$(gh issue create "${create_args[@]}" | tail -n 1)
+            gh issue create "${create_args[@]}" | tail -n 1
+          }
+
+          # Returns 0 when this issue fully handled the failure (caller should continue).
+          # Always reads comments so a juju/juju link is not skipped.
+          follow_upstream() {
+            local number=$1 state=$2 url=$3 repo=$4 body=$5
+            local up up_json up_state up_url owner name issue_n comments text new_url
+            comments=$(local_comments "$repo" "$number")
+            text=$(printf '%s\n%s\n' "$body" "$comments")
+            up=$(upstream_from_text "$text")
+            [[ -n "$up" ]] || return 1
+            if [[ ! "$up" =~ https://github.com/([^/]+)/([^/]+)/issues/([0-9]+) ]]; then
+              return 1
+            fi
+            owner=${BASH_REMATCH[1]}
+            name=${BASH_REMATCH[2]}
+            issue_n=${BASH_REMATCH[3]}
+            if ! up_json=$(GH_TOKEN="$LOOKUP_TOKEN" gh api "repos/${owner}/${name}/issues/${issue_n}" 2> up.err); then
+              note "Could not read upstream ${up}. Treating it as still open. No new issue."
+              comment_on_local "$number" "$(printf '%s\n\nUpstream (unread): %s\n' "$recurrence" "$up")" "$repo"
+              record "$sig" "$url" "$repo" "$number"
+              return 0
+            fi
+            up_state=$(jq -r '.state' <<<"$up_json")
+            up_url=$(jq -r '.html_url' <<<"$up_json")
+            if [[ "$up_state" == "open" ]]; then
+              comment_on_local "$number" "$(printf 'Already reported on %s (still open): %s\n\n%s\n' "$UPSTREAM_REPO" "$up_url" "$recurrence")" "$repo"
+              record "$sig" "$url" "$repo" "$number"
+              note "Upstream ${up_url} is open. Commented on ${url}. No issue opened."
+              return 0
+            fi
+            # Upstream closed, tests still fail: close this local issue (if open) and open
+            # a successor so Jira sees a new triage item. Humans file a new upstream bug
+            # and comment Upstream: on the successor.
+            if [[ "$repo" == "$GITHUB_REPOSITORY" ]]; then
+              new_url=$(create_local_issue "$url" "$up_url")
+              if [[ "$state" == "open" ]]; then
+                gh issue close "$number" -R "$GITHUB_REPOSITORY" --comment "$(printf 'Upstream %s is closed but tests still fail. Opened %s for triage and a new upstream report.\n' "$up_url" "$new_url")"
+                note "Upstream ${up_url} is closed. Tests still fail. Closed ${url}. Opened ${new_url} for Jira triage."
+              else
+                note "Upstream ${up_url} is closed. Tests still fail. Opened ${new_url} for Jira triage. Previous ${url} was already closed."
+              fi
+              record "$sig" "$new_url" "$GITHUB_REPOSITORY" "${new_url##*/}"
+              return 0
+            fi
+            note "Upstream ${up_url} is closed. Current run still fails. Tracked issue was transferred to ${url}."
+            return 1
+          }
+
+          issue_with_marker() {
+            jq -c --arg marker "$marker" \
+              'map(select((.body // "") | contains($marker))) | sort_by(.number) | last // empty' <<<"$1"
+          }
+
+          issue_with_upstream() {
+            jq -c --arg repo "$UPSTREAM_REPO" '
+              ($repo | split("/")) as $p
+              | map(select(
+                  ((.body // "") | split("\n")
+                    | map(select(test("(?i)^[[:space:]]*(Previous( local issue)?|Closed[- ]upstream):") | not))
+                    | join("\n"))
+                  | test(
+                      "(?i)(github\\.com/" + $p[0] + "/" + $p[1] + "/issues/[0-9]+|"
+                      + $p[0] + "/" + $p[1] + "#[0-9]+|"
+                      + "juju[[:space:]]*issue[: #]+[0-9]+|"
+                      + "upstream:[[:space:]]*https://github\\.com/)"
+                    )
+                ))
+              | sort_by(.number) | last // empty
+            ' <<<"$1"
+          }
+
+          scan_issues_for_upstream() {
+            local list=$1 issue number body comments text
+            issue=$(issue_with_upstream "$list")
+            if [[ -n "$issue" ]]; then
+              printf '%s' "$issue"
+              return
+            fi
+            while IFS= read -r issue; do
+              [[ -n "$issue" ]] || continue
+              number=$(jq -r '.number' <<<"$issue")
+              body=$(jq -r '.body // ""' <<<"$issue")
+              comments=$(local_comments "$GITHUB_REPOSITORY" "$number")
+              text=$(printf '%s\n%s\n' "$body" "$comments")
+              if [[ -n "$(upstream_from_text "$text")" ]]; then
+                printf '%s' "$issue"
+                return
+              fi
+            done < <(jq -c '.[0:30][]' <<<"$list")
+          }
+
+          for group in "${group_dirs[@]}"; do
+            group=${group%/}
+            sig=$(basename "$group")
+            marker="<!-- juju-testing-signature:${sig} -->"
+            error_line=$(cat "$group/error.txt" 2>/dev/null || echo "unknown error")
+            commands=$(sort -u "$group/commands.txt")
+            command_list=$(sed 's/^/- /' <<<"$commands")
+            note "Matching signature ${sig}; command: ${commands//$'\n'/ | }; error: ${error_line}"
+            recurrence=$(printf 'Failed again with the same error.\n\nRun: %s\nCommit: %s\nFailed commands:\n%s\n' \
+              "$RUN_URL" "$SOURCE_SHA" "$command_list")
+
+            target=""
+            target_state=""
+            target_url=""
+            target_repo=""
+            target_body=""
+            entry=$(jq -c --arg sig "$sig" '.[$sig] // empty' ledger.json)
+            if [[ -n "$entry" ]]; then
+              recorded_repo=$(jq -r '.repo' <<<"$entry")
+              recorded_number=$(jq -r '.number' <<<"$entry")
+              if issue=$(GH_TOKEN="$LOOKUP_TOKEN" gh api "repos/${recorded_repo}/issues/${recorded_number}" 2> lookup.err); then
+                target=$(jq -r '.number' <<<"$issue")
+                target_state=$(jq -r '.state' <<<"$issue")
+                target_url=$(jq -r '.html_url' <<<"$issue")
+                target_repo=$(jq -r '.repository_url | sub("^.*/repos/"; "")' <<<"$issue")
+                target_body=$(jq -r '.body // ""' <<<"$issue")
+              elif grep -q 'HTTP 410' lookup.err; then
+                note "Signature ${sig} was tracked in ${recorded_repo}#${recorded_number}, which was deleted. Opening a new issue."
+              elif grep -q 'HTTP 404' lookup.err; then
+                note "Signature ${sig} was tracked in ${recorded_repo}#${recorded_number}, which this repository can no longer read. It was likely transferred to a private repository. No issue opened."
+                continue
+              else
+                cat lookup.err >&2
+                exit 1
+              fi
+            fi
+
+            if [[ -z "$target" ]]; then
+              found_issue=$(issue_with_marker "$open_issues")
+              found_state=open
+              found_repo=$GITHUB_REPOSITORY
+              if [[ -z "$found_issue" ]]; then
+                found_issue=$(issue_with_marker "$closed_here")
+                found_state=closed
+              fi
+              if [[ -z "$found_issue" ]]; then
+                if ! found=$(GH_TOKEN="$LOOKUP_TOKEN" gh search issues "$sig" --owner "$GITHUB_REPOSITORY_OWNER" \
+                    --limit 30 --json number,state,url,repository,body,updatedAt 2> search.err); then
+                  echo "::warning::Searching ${GITHUB_REPOSITORY_OWNER} for signature ${sig} failed: $(cat search.err)"
+                  found='[]'
+                fi
+                found_issue=$(jq -c --arg marker "$marker" \
+                  'map(select((.body // "") | contains($marker))) | sort_by(.updatedAt) | last // empty' <<<"$found")
+                if [[ -n "$found_issue" ]]; then
+                  found_state=$(jq -r '.state | ascii_downcase' <<<"$found_issue")
+                  found_repo=$(jq -r '.repository.nameWithOwner' <<<"$found_issue")
+                fi
+              fi
+              if [[ -z "$found_issue" ]]; then
+                found_issue=$(scan_issues_for_upstream "$open_issues")
+                found_state=open
+                found_repo=$GITHUB_REPOSITORY
+              fi
+              if [[ -z "$found_issue" ]]; then
+                found_issue=$(scan_issues_for_upstream "$closed_here")
+                found_state=closed
+                found_repo=$GITHUB_REPOSITORY
+              fi
+              if [[ -z "$found_issue" ]]; then
+                if ! found=$(GH_TOKEN="$LOOKUP_TOKEN" gh search issues "$UPSTREAM_REPO" --repo "$GITHUB_REPOSITORY" \
+                    --limit 20 --json number,state,url,repository,body,updatedAt 2> search.err); then
+                  echo "::warning::Searching ${GITHUB_REPOSITORY} for ${UPSTREAM_REPO} failed: $(cat search.err)"
+                  found='[]'
+                fi
+                found_issue=$(jq -c 'sort_by(.updatedAt) | last // empty' <<<"$found")
+                if [[ -n "$found_issue" ]]; then
+                  found_state=$(jq -r '.state | ascii_downcase' <<<"$found_issue")
+                  found_repo=$(jq -r --arg repo "$GITHUB_REPOSITORY" '.repository.nameWithOwner // $repo' <<<"$found_issue")
+                fi
+              fi
+              if [[ -n "$found_issue" ]]; then
+                target=$(jq -r '.number' <<<"$found_issue")
+                target_state=$found_state
+                target_url=$(jq -r '.url // .html_url' <<<"$found_issue")
+                target_repo=$found_repo
+                target_body=$(jq -r '.body // ""' <<<"$found_issue")
+              fi
+            fi
+
+            if [[ -n "$target" ]]; then
+              if follow_upstream "$target" "$target_state" "$target_url" "$target_repo" "$target_body"; then
+                continue
+              fi
+              if [[ "$target_repo" == "$GITHUB_REPOSITORY" && "$target_state" == "open" ]]; then
+                gh issue comment "$target" -R "$GITHUB_REPOSITORY" --body "$recurrence"
+                record "$sig" "$target_url" "$GITHUB_REPOSITORY" "$target"
+                note "Signature ${sig} recurred. Commented on ${target_url}."
+                continue
+              fi
+              if [[ "$target_state" == "open" ]]; then
+                note "Signature ${sig} is already tracked in ${target_url}. No issue opened."
+                record "$sig" "$target_url" "$target_repo" "$target"
+                continue
+              fi
+              skip_closed "$sig" "$target_url" "$target_repo" "$target"
+              continue
+            fi
+
+            url=$(create_local_issue "" "")
             record "$sig" "$url" "$GITHUB_REPOSITORY" "${url##*/}"
             note "Signature ${sig} is new. Opened ${url}."
           done
@@ -544,3 +712,131 @@ jobs:
           name: ${{ steps.ledger.outputs.name }}
           path: ledger.json
           retention-days: 90
+
+  close-if-fixed:
+    needs: integration
+    if: ${{ success() && (github.event_name == 'schedule' || (inputs.report-manual-runs && github.event_name == 'workflow_dispatch')) }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      issues: write
+    concurrency:
+      group: juju-testing-report-${{ github.repository }}-${{ inputs.juju-channel }}
+      cancel-in-progress: false
+    steps:
+      - name: Load issue ledger from earlier runs
+        id: ledger
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JUJU_CHANNEL: ${{ inputs.juju-channel }}
+        run: |
+          set -euo pipefail
+          name="juju-testing-issues-${JUJU_CHANNEL//\//-}"
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+          echo '{}' > ledger.json
+          if ! id=$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=${name}&per_page=20" \
+              --jq '[.artifacts[] | select(.expired | not)] | sort_by(.created_at) | last | .id // empty'); then
+            echo "::warning::Could not list earlier issue ledgers. Open local issues are left unchanged."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ -n "$id" ]]; then
+            if ! { gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${id}/zip" > ledger.zip \
+                && unzip -o -q ledger.zip ledger.json \
+                && jq -e 'type == "object"' ledger.json > /dev/null; }; then
+              echo "::warning::Could not read issue ledger artifact ${id}. Open local issues are left unchanged."
+              echo '{}' > ledger.json
+              echo "ok=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+          echo "Loaded $(jq 'length' ledger.json) ledger entries from artifact ${id:-none}"
+          echo "ok=true" >> "$GITHUB_OUTPUT"
+
+      - name: Close local issues when tests pass and upstream is closed
+        if: ${{ steps.ledger.outputs.ok == 'true' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LOOKUP_TOKEN: ${{ secrets.ISSUE_LOOKUP_TOKEN || github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          UPSTREAM_REPO: juju/juju
+        run: |
+          set -euo pipefail
+          UPSTREAM_REPO=${UPSTREAM_REPO:-juju/juju}
+
+          note() {
+            printf '%s\n' "$1"
+            printf -- '- %s\n' "$1" >> "$GITHUB_STEP_SUMMARY"
+          }
+
+          current_issue_text() {
+            grep -Eiv '^[[:space:]]*(Previous( local issue)?|Closed[- ]upstream):' <<<"$1" || true
+          }
+
+          upstream_from_text() {
+            local text owner=${UPSTREAM_REPO%%/*} name=${UPSTREAM_REPO#*/} url n
+            text=$(current_issue_text "$1")
+            url=$(grep -Ei '^[[:space:]]*Upstream:[[:space:]]*https://github.com/[^[:space:]]+/issues/[0-9]+' <<<"$text" \
+              | grep -Eo 'https://github.com/[^[:space:]]+/issues/[0-9]+' | head -n 1 || true)
+            if [[ -z "$url" ]]; then
+              url=$(grep -Eo "https://github.com/${owner}/${name}/issues/[0-9]+" <<<"$text" | head -n 1 || true)
+            fi
+            if [[ -z "$url" ]]; then
+              url=$(grep -Eo 'https://github.com/[^[:space:]]+/issues/[0-9]+' <<<"$text" | head -n 1 || true)
+            fi
+            if [[ -z "$url" ]]; then
+              n=$(grep -Eo "${owner}/${name}#[0-9]+" <<<"$text" | head -n 1 | grep -Eo '[0-9]+$' || true)
+              [[ -n "$n" ]] && url="https://github.com/${owner}/${name}/issues/${n}"
+            fi
+            if [[ -z "$url" ]]; then
+              n=$(grep -Ei 'juju[[:space:]]*issue[: #]+[0-9]+' <<<"$text" | grep -Eo '[0-9]+' | tail -n 1 || true)
+              [[ -n "$n" ]] && url="https://github.com/${owner}/${name}/issues/${n}"
+            fi
+            printf '%s' "$url"
+          }
+
+          local_comments() {
+            GH_TOKEN="$LOOKUP_TOKEN" gh api --paginate "repos/${1}/issues/${2}/comments" --jq '.[].body' 2>/dev/null || true
+          }
+
+          while IFS= read -r entry; do
+            [[ -n "$entry" ]] || continue
+            repo=$(jq -r '.value.repo' <<<"$entry")
+            number=$(jq -r '.value.number' <<<"$entry")
+            url=$(jq -r '.value.url' <<<"$entry")
+            [[ "$repo" == "$GITHUB_REPOSITORY" ]] || continue
+            if ! issue=$(GH_TOKEN="$LOOKUP_TOKEN" gh api "repos/${repo}/issues/${number}" 2>/dev/null); then
+              note "Could not read ${repo}#${number}. Left it unchanged."
+              continue
+            fi
+            state=$(jq -r '.state' <<<"$issue")
+            if [[ "$state" != "open" ]]; then
+              note "${url} is already closed."
+              continue
+            fi
+            body=$(jq -r '.body // ""' <<<"$issue")
+            comments=$(local_comments "$repo" "$number")
+            up=$(upstream_from_text "$(printf '%s\n%s\n' "$body" "$comments")")
+            if [[ -z "$up" ]]; then
+              gh issue close "$number" -R "$repo" --comment "$(printf 'Tests passed in %s. No linked %s issue; treating this as a local-only failure that is resolved.\n' "$RUN_URL" "$UPSTREAM_REPO")"
+              note "Tests passed. ${url} has no ${UPSTREAM_REPO} link. Closed it."
+              continue
+            fi
+            if [[ ! "$up" =~ https://github.com/([^/]+)/([^/]+)/issues/([0-9]+) ]]; then
+              continue
+            fi
+            if ! up_json=$(GH_TOKEN="$LOOKUP_TOKEN" gh api "repos/${BASH_REMATCH[1]}/${BASH_REMATCH[2]}/issues/${BASH_REMATCH[3]}" 2>/dev/null); then
+              note "Could not read upstream ${up}. Left ${url} open."
+              continue
+            fi
+            up_state=$(jq -r '.state' <<<"$up_json")
+            up_url=$(jq -r '.html_url' <<<"$up_json")
+            if [[ "$up_state" != "closed" ]]; then
+              note "Tests passed. Upstream ${up_url} is still open. Left ${url} open."
+              continue
+            fi
+            gh issue close "$number" -R "$repo" --comment "$(printf 'Tests passed in %s after upstream was closed.\n\nUpstream: %s\n' "$RUN_URL" "$up_url")"
+            note "Tests passed and upstream ${up_url} is closed. Closed ${url}."
+          done < <(jq -c 'to_entries[]' ledger.json)
