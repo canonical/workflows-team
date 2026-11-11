@@ -245,8 +245,8 @@ jobs:
           fi
           error_line=${error_line:0:300}
           normalized=$(sed -E '
-            s/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/<uuid>/g
-            s/\b[0-9a-f]{7,}\b/<hex>/g
+            s/[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}/<uuid>/g
+            s/\b[0-9A-Fa-f]{7,}\b/<hex>/g
             s/[0-9]+/N/g
             s/[[:space:]]+/ /g
           ' <<<"$error_line")
