@@ -528,19 +528,6 @@ jobs:
               'map(select((.body // "") | contains($marker))) | sort_by(.number) | last // empty' <<<"$1"
           }
 
-          scan_issues_for_upstream() {
-            local list=$1 issue number comments
-            while IFS= read -r issue; do
-              [[ -n "$issue" ]] || continue
-              number=$(jq -r '.number' <<<"$issue")
-              comments=$(local_comments "$GITHUB_REPOSITORY" "$number")
-              if [[ -n "$(upstream_from_comments "$comments")" ]]; then
-                printf '%s' "$issue"
-                return
-              fi
-            done < <(jq -c '.[0:30][]' <<<"$list")
-          }
-
           for group in "${group_dirs[@]}"; do
             group=${group%/}
             sig=$(basename "$group")
@@ -597,28 +584,6 @@ jobs:
                 if [[ -n "$found_issue" ]]; then
                   found_state=$(jq -r '.state | ascii_downcase' <<<"$found_issue")
                   found_repo=$(jq -r '.repository.nameWithOwner' <<<"$found_issue")
-                fi
-              fi
-              if [[ -z "$found_issue" ]]; then
-                found_issue=$(scan_issues_for_upstream "$open_issues")
-                found_state=open
-                found_repo=$GITHUB_REPOSITORY
-              fi
-              if [[ -z "$found_issue" ]]; then
-                found_issue=$(scan_issues_for_upstream "$closed_here")
-                found_state=closed
-                found_repo=$GITHUB_REPOSITORY
-              fi
-              if [[ -z "$found_issue" ]]; then
-                if ! found=$(GH_TOKEN="$LOOKUP_TOKEN" gh search issues "Upstream:" --repo "$GITHUB_REPOSITORY" \
-                    --limit 20 --json number,state,url,repository,body,updatedAt 2> search.err); then
-                  echo "::warning::Searching ${GITHUB_REPOSITORY} for Upstream: links failed: $(cat search.err)"
-                  found='[]'
-                fi
-                found_issue=$(scan_issues_for_upstream "$found")
-                if [[ -n "$found_issue" ]]; then
-                  found_state=$(jq -r '.state | ascii_downcase' <<<"$found_issue")
-                  found_repo=$(jq -r --arg repo "$GITHUB_REPOSITORY" '.repository.nameWithOwner // $repo' <<<"$found_issue")
                 fi
               fi
               if [[ -n "$found_issue" ]]; then
