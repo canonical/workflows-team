@@ -224,17 +224,15 @@ jobs:
           error_line=""
           if [[ -f "$logfile" ]]; then
             clean_log=$(sed -E 's/\x1b\[[0-9;]*m//g' "$logfile")
-            # Pytest's short summary is the failure to track. Earlier juju ERROR
-            # lines (cleanup, model not found) would make every failure look the same.
+            # Pytest's short summary is the failure to track. Do not use the first
+            # ^ERROR  line in the full log: juju destroy-model cleanup prints
+            # "ERROR model … not found" and would make every failure look the same.
             summary=$(awk '/short test summary info/{p=1} p' <<<"$clean_log")
             if [[ -n "$summary" ]]; then
               error_line=$(grep -E '^(FAILED|ERROR) ' <<<"$summary" | head -n 1 || true)
             fi
             if [[ -z "$error_line" ]]; then
               error_line=$(grep -E '^FAILED ' <<<"$clean_log" | head -n 1 || true)
-            fi
-            if [[ -z "$error_line" ]]; then
-              error_line=$(grep -E '^ERROR ' <<<"$clean_log" | head -n 1 || true)
             fi
             if [[ -z "$error_line" ]]; then
               error_line=$(grep -E '[A-Za-z]+(Error|Exception)\b|^error:|ERROR:' <<<"$clean_log" | tail -n 1 || true)
