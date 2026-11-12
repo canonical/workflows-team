@@ -43,5 +43,5 @@ jobs:
             if: failure() && github.event_name == 'schedule'
             uses: mattermost/action-mattermost-notify@master
             with:
-              MATTERMOST_WEBHOOK_URL: $${{ secrets.MATTERMOST_WEBHOOK_URL }}
-              TEXT: SSDLC scheduled scan failed for `${{ matrix.product }}` in [$${{ github.repository }}]($${{ github.server_url }}/$${{ github.repository }}/actions/runs/$${{ github.run_id }})
+              MATTERMOST_WEBHOOK_URL: ${{ secrets.MATTERMOST_WEBHOOK_URL }}
+              TEXT: SSDLC scheduled scan failed for `${{ matrix.product }}` in [${{ github.repository }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
