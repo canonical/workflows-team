@@ -25,7 +25,7 @@ jobs:
         id: gitea
         uses: canonical/workflows-team/actions/setup-gitea-action@main
         with:
-          model: my-test-model
+          model: test-model
 
       - name: Show Gitea repository
         run: |
