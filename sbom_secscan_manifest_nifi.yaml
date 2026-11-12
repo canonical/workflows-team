@@ -1,0 +1,39 @@
+# run secscan using the sbomber tool on all nifi charms and rocks
+# this manifest is used in `.github/workflows/sbom_secscan.yaml`
+#
+# Every artifact defines `type`, `channel` and `base`. Rocks are pulled from the
+# OCI resource of a charm at that channel, so we scan the image actually shipped.
+#
+# `ssdlc_params` are the SEC0025 identification parameters; with them, results
+# go to the long-term SSDLC scan registry. `version` is the product track and
+# `cycle` defaults to the upcoming Ubuntu release (the cycle being scanned).
+
+clients:
+  sbom:
+    department: charm_engineering
+    email: workflows-charmers@canonical.com
+    team: analytics
+  secscan: {}
+
+artifacts:
+  # charms
+  - name: nifi-k8s
+    type: charm
+    channel: 2.10/edge
+    base: ubuntu@26.04
+    ssdlc_params:
+      name: Charmed NiFi
+      version: "2.10"
+      channel: edge
+
+  # rocks
+  - name: nifi-rock
+    type: rock
+    charm: nifi-k8s
+    charm_resource: nifi-image
+    channel: 2.10/edge
+    base: ubuntu@26.04
+    ssdlc_params:
+      name: Charmed NiFi
+      version: "2.10"
+      channel: edge
