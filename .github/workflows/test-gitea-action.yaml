@@ -1,0 +1,136 @@
+name: Test setup-gitea-action
+
+on:
+  push:
+    branches:
+      - add-setup-gitea-action
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    env:
+      JUJU_MODEL: setup-gitea-action-test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install and run Concierge
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo snap install --classic concierge
+          sudo concierge prepare -p k8s
+
+      - name: Configure kubectl
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Concierge's k8s preset provisions Canonical Kubernetes and
+          # bootstraps Juju onto it. Install the standard kubectl client
+          # separately so the action exercises the same kubectl interface
+          # that consumer repositories are expected to provide.
+          sudo snap install kubectl --classic
+
+          mkdir -p "${HOME}/.kube"
+          sudo k8s config > "${HOME}/.kube/config"
+          chmod 600 "${HOME}/.kube/config"
+
+          kubectl get nodes -o wide
+
+      - name: Create test Juju model
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          juju add-model "${JUJU_MODEL}"
+          juju status --model "${JUJU_MODEL}"
+
+      - name: Test setup-gitea-action
+        id: gitea
+        uses: ./actions/setup-gitea-action
+        with:
+          model: ${{ env.JUJU_MODEL }}
+
+      - name: Verify action result
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=== Gitea repository ==="
+          echo "${{ steps.gitea.outputs.repository-url }}"
+
+          echo "=== Kubernetes ==="
+          kubectl get pods -n gitea -o wide
+          kubectl get service -n gitea
+
+          echo "=== Juju ==="
+          juju status --model "${JUJU_MODEL}" --relations
+
+          echo "=== git-integrator config ==="
+          juju config --model "${JUJU_MODEL}" git-integrator
+
+          echo "=== git-integrator unit ==="
+          juju show-unit --model "${JUJU_MODEL}" git-integrator/0
+
+      - name: Collect diagnostics on failure
+        if: failure()
+        shell: bash
+        run: |
+          set +e
+
+          echo "=== Kubernetes nodes ==="
+          kubectl get nodes -o wide
+
+          echo "=== All Kubernetes pods ==="
+          kubectl get pods -A -o wide
+
+          echo "=== Gitea resources ==="
+          kubectl get all -n gitea
+          kubectl describe deployment gitea -n gitea
+          kubectl logs deployment/gitea -n gitea --tail=200
+
+          echo "=== Juju status ==="
+          juju status --model "${JUJU_MODEL}" --relations
+
+          echo "=== git-integrator logs ==="
+          juju debug-log \
+            --model "${JUJU_MODEL}" \
+            --include git-integrator \
+            --replay \
+            --no-tail
+
+      - name: Clean up action resources
+        if: always()
+        shell: bash
+        env:
+          JUJU_MODEL: ${{ env.JUJU_MODEL }}
+          GITEA_NAMESPACE: gitea
+        run: |
+          set +e
+          bash "${{ github.workspace }}/actions/setup-gitea-action/scripts/cleanup.sh"
+
+      - name: Destroy test Juju model
+        if: always()
+        shell: bash
+        env:
+          JUJU_MODEL: ${{ env.JUJU_MODEL }}
+        run: |
+          set +e
+
+          printf '%s\n' "${JUJU_MODEL}" | juju destroy-model \
+            "${JUJU_MODEL}" \
+            --destroy-storage
+
+      - name: Restore Concierge environment
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          sudo concierge restore
+

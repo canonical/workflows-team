@@ -1,0 +1,116 @@
+name: "Set up Gitea and git-integrator"
+description: "Deploy an ephemeral Gitea instance into an existing Kubernetes cluster and configure git-integrator to use it."
+
+inputs:
+  model:
+    description: "Existing Juju model in which git-integrator should be deployed."
+    required: true
+
+  repository-name:
+    description: "Name of the repository to create in Gitea."
+    required: false
+    default: "gitea-demo"
+
+  tracking-ref:
+    description: "Git ref that git-integrator should track."
+    required: false
+    default: "main"
+
+  path:
+    description: "Path exposed by git-integrator."
+    required: false
+    default: "/"
+
+  gitea-image:
+    description: "Gitea container image."
+    required: false
+    default: "docker.gitea.com/gitea:1.23.8"
+
+  git-integrator-channel:
+    description: "Charm channel used to deploy git-integrator."
+    required: false
+    default: "1.0/edge"
+
+  gitea-namespace:
+    description: "Kubernetes namespace used for the temporary Gitea deployment."
+    required: false
+    default: "gitea"
+
+  gitea-username:
+    description: "Username used to create the Gitea repository owner."
+    required: false
+    default: "gitea"
+
+outputs:
+  repository-url:
+    description: "Cluster-internal URL of the repository used by git-integrator."
+    value: ${{ steps.gitea.outputs.repository-url }}
+
+  repository-name:
+    description: "Name of the repository created in Gitea."
+    value: ${{ steps.gitea.outputs.repository-name }}
+
+  tracking-ref:
+    description: "Git ref configured for git-integrator."
+    value: ${{ inputs.tracking-ref }}
+
+  git-integrator-app:
+    description: "Name of the git-integrator application."
+    value: ${{ steps.integrator.outputs.git-integrator-app }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Check Kubernetes and Juju
+      shell: bash
+      env:
+        JUJU_MODEL: ${{ inputs.model }}
+      run: |
+        set -euo pipefail
+
+        command -v kubectl >/dev/null 2>&1 || {
+          echo "::error::kubectl is required. Provision Kubernetes before using this action."
+          exit 1
+        }
+
+        command -v juju >/dev/null 2>&1 || {
+          echo "::error::juju is required. Provision Juju before using this action."
+          exit 1
+        }
+
+        echo "=== Kubernetes client ==="
+        kubectl version --client
+
+        echo "=== Kubernetes nodes ==="
+        kubectl get nodes -o wide
+
+        echo "=== Juju version ==="
+        juju version
+
+        echo "=== Juju model ==="
+        juju status --model "${JUJU_MODEL}" --format=short
+
+    - name: Create Gitea and seed repository
+      id: gitea
+      shell: bash
+      env:
+        GITEA_NAMESPACE: ${{ inputs.gitea-namespace }}
+        GITEA_IMAGE: ${{ inputs.gitea-image }}
+        GITEA_USERNAME: ${{ inputs.gitea-username }}
+        REPOSITORY_NAME: ${{ inputs.repository-name }}
+        TRACKING_REF: ${{ inputs.tracking-ref }}
+      run: bash "${{ github.action_path }}/scripts/setup-gitea.sh"
+
+    - name: Deploy and configure git-integrator
+      id: integrator
+      shell: bash
+      env:
+        JUJU_MODEL: ${{ inputs.model }}
+        GIT_INTEGRATOR_CHANNEL: ${{ inputs.git-integrator-channel }}
+        REPOSITORY_URL: ${{ steps.gitea.outputs.repository-url }}
+        TRACKING_REF: ${{ inputs.tracking-ref }}
+        REPOSITORY_PATH: ${{ inputs.path }}
+        GITEA_USERNAME: ${{ steps.gitea.outputs.gitea-username }}
+        GITEA_TOKEN: ${{ steps.gitea.outputs.gitea-token }}
+      run: bash "${{ github.action_path }}/scripts/deploy-git-integrator.sh"
+
