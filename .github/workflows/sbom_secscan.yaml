@@ -37,7 +37,7 @@ jobs:
           - name: Run sbomber action
             uses: canonical/sbomber/.github/actions/run@main
             with:
-              manifest: "${{ github.workspace }}/sbom_secscan_manifest_${{ matrix.product }}.yaml"
+              manifest: "${{ github.workspace }}/sbom_secscan_manifests/${{ matrix.product }}.yaml"
               artifact-name: ${{ matrix.product }}
           - name: Notify team on scheduled failure
             if: failure() && github.event_name == 'schedule'
