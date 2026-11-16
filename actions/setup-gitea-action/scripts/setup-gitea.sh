@@ -23,13 +23,19 @@ GITEA_INTERNAL_REPOSITORY_URL="${GITEA_INTERNAL_BASE_URL}/${GITEA_USERNAME}/${RE
 
 tmp_manifest="$(mktemp)"
 port_forward_pid=""
+WORKTREE=""
 
 cleanup() {
     if [[ -n "${port_forward_pid}" ]]; then
         kill "${port_forward_pid}" >/dev/null 2>&1 || true
         wait "${port_forward_pid}" >/dev/null 2>&1 || true
     fi
+
     rm -f "${tmp_manifest}"
+
+    if [[ -n "${WORKTREE}" ]]; then
+        rm -rf "${WORKTREE}"
+    fi
 }
 trap cleanup EXIT
 
@@ -166,31 +172,19 @@ TOKEN_RESPONSE="$(
         -u "${GITEA_USERNAME}:${GITEA_PASSWORD}" \
         "http://127.0.0.1:${LOCAL_PORT}/api/v1/users/${GITEA_USERNAME}/tokens" \
         -H 'Content-Type: application/json' \
-        -d "$(python3 - <<PY
-import json
-print(json.dumps({
-    "name": "${GITEA_TOKEN_NAME}",
-    "scopes": ["all"]
-}))
-PY
-)"
+        -d "$(jq -n \
+            --arg name "${GITEA_TOKEN_NAME}" \
+            '{name: $name, scopes: ["all"]}'
+        )"
 )"
 
-GITEA_TOKEN="$(
+if ! GITEA_TOKEN="$(
     printf '%s' "${TOKEN_RESPONSE}" |
-    python3 -c '
-import json
-import sys
-
-data = json.load(sys.stdin)
-token = data.get("sha1")
-
-if not token:
-    raise SystemExit("Gitea token response did not contain sha1")
-
-print(token)
-'
-)"
+        jq -er '.sha1 | select(type == "string" and length > 0)'
+)"; then
+    echo "::error::Gitea token response did not contain a valid sha1."
+    exit 1
+fi
 
 echo "::add-mask::${GITEA_TOKEN}"
 
@@ -204,15 +198,14 @@ HTTP_STATUS="$(
         -u "${GITEA_USERNAME}:${GITEA_TOKEN}" \
         "http://127.0.0.1:${LOCAL_PORT}/api/v1/user/repos" \
         -H 'Content-Type: application/json' \
-        -d "$(python3 - <<PY
-import json
-print(json.dumps({
-    "name": "${REPOSITORY_NAME}",
-    "private": True,
-    "auto_init": False
-}))
-PY
-)"
+        -d "$(jq -n \
+            --arg name "${REPOSITORY_NAME}" \
+            '{
+                name: $name,
+                private: true,
+                auto_init: false
+            }'
+        )"
 )"
 
 case "${HTTP_STATUS}" in
@@ -231,11 +224,6 @@ esac
 echo "=== Seeding repository ==="
 
 WORKTREE="$(mktemp -d)"
-
-cleanup_worktree() {
-    rm -rf "${WORKTREE}"
-}
-trap 'cleanup_worktree; cleanup' EXIT
 
 git -C "${WORKTREE}" init -q
 git -C "${WORKTREE}" config user.name "Gitea CI"
