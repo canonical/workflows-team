@@ -9,26 +9,17 @@ set -euo pipefail
 : "${GITEA_USERNAME:?GITEA_USERNAME is required}"
 : "${GITEA_TOKEN:?GITEA_TOKEN is required}"
 
-APP_NAME="git-integrator"
-SECRET_NAME="git-integrator-credentials"
+APP_NAME="gitea-action-git-integrator"
+SECRET_NAME="gitea-action-git-integrator-credentials"
 
 echo "=== Deploying ${APP_NAME} ==="
 
-if ! juju status \
-    --model="${JUJU_MODEL}" \
-    --format=json |
-    jq -e --arg app "${APP_NAME}" \
-    '.applications | has($app)' >/dev/null; then
+juju deploy \
+    git-integrator \
+    "${APP_NAME}" \
+    --channel="${GIT_INTEGRATOR_CHANNEL}" \
+    --model="${JUJU_MODEL}"
 
-    echo "Application ${APP_NAME} not found. Deploying..."
-
-    juju deploy \
-        "${APP_NAME}" \
-        --channel="${GIT_INTEGRATOR_CHANNEL}" \
-        --model="${JUJU_MODEL}"
-else
-    echo "Application ${APP_NAME} already exists."
-fi
 
 echo "=== Waiting for application registration ==="
 

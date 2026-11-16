@@ -38,11 +38,15 @@ envsubst < "${MANIFEST}" > "${tmp_manifest}"
 
 echo "=== Deploying Gitea ==="
 
-kubectl create namespace "${GITEA_NAMESPACE}" \
-    --dry-run=client \
-    -o yaml | kubectl apply -f -
+if kubectl get namespace "${GITEA_NAMESPACE}" >/dev/null 2>&1; then
+    echo "::error::Namespace ${GITEA_NAMESPACE} already exists."
+    exit 1
+fi
+
+kubectl create namespace "${GITEA_NAMESPACE}"
 
 kubectl apply -f "${tmp_manifest}"
+
 
 echo "=== Waiting for Gitea ==="
 

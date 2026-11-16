@@ -9,7 +9,7 @@ inputs:
   repository-name:
     description: "Name of the repository to create in Gitea."
     required: false
-    default: "gitea-demo"
+    default: "gitea-action-repository"
 
   tracking-ref:
     description: "Git ref that git-integrator should track."
@@ -34,12 +34,12 @@ inputs:
   gitea-namespace:
     description: "Kubernetes namespace used for the temporary Gitea deployment."
     required: false
-    default: "gitea"
+    default: "gitea-action"
 
   gitea-username:
     description: "Username used to create the Gitea repository owner."
     required: false
-    default: "gitea"
+    default: "gitea-action"
 
 outputs:
   repository-url:

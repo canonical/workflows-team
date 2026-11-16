@@ -66,17 +66,17 @@ jobs:
           echo "${{ steps.gitea.outputs.repository-url }}"
 
           echo "=== Kubernetes ==="
-          kubectl get pods -n gitea -o wide
-          kubectl get service -n gitea
+          kubectl get pods -n gitea-action -o wide
+          kubectl get service -n gitea-action
 
           echo "=== Juju ==="
           juju status --model "${JUJU_MODEL}" --relations
 
           echo "=== git-integrator config ==="
-          juju config --model "${JUJU_MODEL}" git-integrator
+          juju config --model "${JUJU_MODEL}" gitea-action-git-integrator
 
           echo "=== git-integrator unit ==="
-          juju show-unit --model "${JUJU_MODEL}" git-integrator/0
+          juju show-unit --model "${JUJU_MODEL}" gitea-action-git-integrator/0
 
       - name: Collect diagnostics on failure
         if: failure()
@@ -91,9 +91,9 @@ jobs:
           kubectl get pods -A -o wide
 
           echo "=== Gitea resources ==="
-          kubectl get all -n gitea
-          kubectl describe deployment gitea -n gitea
-          kubectl logs deployment/gitea -n gitea --tail=200
+          kubectl get all -n gitea-action
+          kubectl describe deployment gitea -n gitea-action
+          kubectl logs deployment/gitea -n gitea-action --tail=200
 
           echo "=== Juju status ==="
           juju status --model "${JUJU_MODEL}" --relations
@@ -101,7 +101,7 @@ jobs:
           echo "=== git-integrator logs ==="
           juju debug-log \
             --model "${JUJU_MODEL}" \
-            --include git-integrator \
+            --include gitea-action-git-integrator \
             --replay \
             --no-tail
 
@@ -110,7 +110,7 @@ jobs:
         shell: bash
         env:
           JUJU_MODEL: ${{ env.JUJU_MODEL }}
-          GITEA_NAMESPACE: gitea
+          GITEA_NAMESPACE: gitea-action
         run: |
           set +e
           bash "${{ github.workspace }}/actions/setup-gitea-action/scripts/cleanup.sh"
