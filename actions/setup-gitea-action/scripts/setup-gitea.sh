@@ -16,6 +16,8 @@ print(secrets.token_urlsafe(24))
 PY
 )"
 
+echo "::add-mask::${GITEA_PASSWORD}"
+
 GITEA_TOKEN_NAME="git-integrator-$(date +%s)-${RANDOM}"
 GITEA_EMAIL="${GITEA_USERNAME}@example.invalid"
 GITEA_INTERNAL_BASE_URL="http://gitea.${GITEA_NAMESPACE}.svc.cluster.local:3000"
@@ -25,6 +27,7 @@ tmp_manifest="$(mktemp)"
 port_forward_pid=""
 WORKTREE=""
 GIT_CREDENTIAL_FILE=""
+CURL_CONFIG=""
 
 cleanup() {
     if [[ -n "${port_forward_pid}" ]]; then
@@ -40,6 +43,10 @@ cleanup() {
 
     if [[ -n "${GIT_CREDENTIAL_FILE}" ]]; then
         rm -f "${GIT_CREDENTIAL_FILE}"
+    fi
+
+    if [[ -n "${CURL_CONFIG}" ]]; then
+        rm -f "${CURL_CONFIG}"
     fi
 }
 trap cleanup EXIT
@@ -154,16 +161,18 @@ kubectl exec \
 
 echo "=== Creating Gitea user ==="
 
-kubectl exec \
-    --namespace "${GITEA_NAMESPACE}" \
-    deployment/gitea \
-    -- \
-    su -s /bin/sh git -c \
-    "gitea --config /data/gitea/conf/app.ini admin user create \
-        --username '${GITEA_USERNAME}' \
-        --password '${GITEA_PASSWORD}' \
-        --email '${GITEA_EMAIL}' \
-        --must-change-password=false" \
+printf '%s\n' "${GITEA_PASSWORD}" |
+    kubectl exec -i \
+        --namespace "${GITEA_NAMESPACE}" \
+        deployment/gitea \
+        -- \
+        su -s /bin/sh git -c \
+        'IFS= read -r password
+        gitea --config /data/gitea/conf/app.ini admin user create \
+            --username "'"${GITEA_USERNAME}"'" \
+            --password "$password" \
+            --email "'"${GITEA_EMAIL}"'" \
+            --must-change-password=false' \
     || {
         echo "::error::Failed to create Gitea user."
         exit 1
@@ -171,10 +180,17 @@ kubectl exec \
 
 echo "=== Creating Gitea access token ==="
 
+CURL_CONFIG="$(mktemp)"
+chmod 600 "${CURL_CONFIG}"
+
+printf 'user = "%s:%s"\n' \
+    "${GITEA_USERNAME}" \
+    "${GITEA_PASSWORD}" > "${CURL_CONFIG}"
+
 TOKEN_RESPONSE="$(
     curl --silent --show-error --fail \
+        --config "${CURL_CONFIG}" \
         -X POST \
-        -u "${GITEA_USERNAME}:${GITEA_PASSWORD}" \
         "http://127.0.0.1:${LOCAL_PORT}/api/v1/users/${GITEA_USERNAME}/tokens" \
         -H 'Content-Type: application/json' \
         -d "$(jq -n \
@@ -193,14 +209,18 @@ fi
 
 echo "::add-mask::${GITEA_TOKEN}"
 
+printf 'user = "%s:%s"\n' \
+    "${GITEA_USERNAME}" \
+    "${GITEA_TOKEN}" > "${CURL_CONFIG}"
+
 echo "=== Creating Gitea repository ==="
 
 HTTP_STATUS="$(
     curl --silent --show-error \
+        --config "${CURL_CONFIG}" \
         -o /tmp/gitea-repo-response.json \
         -w '%{http_code}' \
         -X POST \
-        -u "${GITEA_USERNAME}:${GITEA_TOKEN}" \
         "http://127.0.0.1:${LOCAL_PORT}/api/v1/user/repos" \
         -H 'Content-Type: application/json' \
         -d "$(jq -n \

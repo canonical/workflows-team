@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SECRET_FILE=""
+
+cleanup() {
+    if [[ -n "${SECRET_FILE}" ]]; then
+        rm -f "${SECRET_FILE}"
+    fi
+}
+trap cleanup EXIT
+
 : "${JUJU_MODEL:?JUJU_MODEL is required}"
 : "${GIT_INTEGRATOR_CHANNEL:?GIT_INTEGRATOR_CHANNEL is required}"
 : "${REPOSITORY_URL:?REPOSITORY_URL is required}"
@@ -30,12 +39,18 @@ juju wait-for application "${APP_NAME}" \
     --timeout=2m
 
 echo "=== Creating Juju secret ==="
+SECRET_FILE="$(mktemp)"
+chmod 600 "${SECRET_FILE}"
+
+printf 'credentials-personal-access-token: %s\n' \
+    "${GITEA_TOKEN}" > "${SECRET_FILE}"
+
 SECRET_URI="$(
     juju add-secret \
         --model="${JUJU_MODEL}" \
         "${SECRET_NAME}" \
-        "credentials-personal-access-token=${GITEA_TOKEN}" \
-        | awk '/^secret:/ {print $1}'
+        --file="${SECRET_FILE}" |
+        awk '/^secret:/ {print $1}'
 )"
 
 if [[ -z "${SECRET_URI}" ]]; then
@@ -86,12 +101,12 @@ if ! juju wait-for application \
     echo "--- Unit details ---"
     juju show-unit \
         --model="${JUJU_MODEL}" \
-        gitea-action-git-integrator/0
+        "${APP_NAME}/0"
 
     echo "--- Recent charm logs ---"
     juju debug-log \
         --model="${JUJU_MODEL}" \
-        --include gitea-action-git-integrator/0 \
+        --include "${APP_NAME}/0" \
         --replay \
         --lines 200
 

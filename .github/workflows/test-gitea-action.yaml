@@ -1,9 +1,11 @@
 name: Test setup-gitea-action
 
 on:
-  push:
-    branches:
-      - add-setup-gitea-action
+  pull_request:
+    paths:
+      - 'actions/setup-gitea-action/**'
+      - '.github/workflows/test-gitea-action.yaml'
+
   workflow_dispatch:
 
 jobs:
