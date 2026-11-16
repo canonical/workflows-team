@@ -24,6 +24,7 @@ GITEA_INTERNAL_REPOSITORY_URL="${GITEA_INTERNAL_BASE_URL}/${GITEA_USERNAME}/${RE
 tmp_manifest="$(mktemp)"
 port_forward_pid=""
 WORKTREE=""
+GIT_CREDENTIAL_FILE=""
 
 cleanup() {
     if [[ -n "${port_forward_pid}" ]]; then
@@ -35,6 +36,10 @@ cleanup() {
 
     if [[ -n "${WORKTREE}" ]]; then
         rm -rf "${WORKTREE}"
+    fi
+
+    if [[ -n "${GIT_CREDENTIAL_FILE}" ]]; then
+        rm -f "${GIT_CREDENTIAL_FILE}"
     fi
 }
 trap cleanup EXIT
@@ -145,7 +150,7 @@ kubectl exec \
     deployment/gitea \
     -- \
     su -s /bin/sh git -c \
-    "gitea --config /data/gitea/conf/app.ini migrate "
+    "gitea --config /data/gitea/conf/app.ini migrate"
 
 echo "=== Creating Gitea user ==="
 
@@ -243,9 +248,25 @@ git -C "${WORKTREE}" add README.md TRACKING_REF
 git -C "${WORKTREE}" commit -q -m "Initial repository contents"
 git -C "${WORKTREE}" branch -M "${TRACKING_REF}"
 
+GIT_CREDENTIAL_FILE="$(mktemp)"
+chmod 600 "${GIT_CREDENTIAL_FILE}"
+
+printf 'protocol=http\nhost=127.0.0.1:%s\nusername=%s\npassword=%s\n\n' \
+    "${LOCAL_PORT}" \
+    "${GITEA_USERNAME}" \
+    "${GITEA_TOKEN}" |
+    git \
+        -c credential.helper= \
+        -c "credential.helper=store --file=${GIT_CREDENTIAL_FILE}" \
+        credential approve
+
 GIT_TERMINAL_PROMPT=0 \
-git -C "${WORKTREE}" push \
-    "http://${GITEA_USERNAME}:${GITEA_TOKEN}@127.0.0.1:${LOCAL_PORT}/${GITEA_USERNAME}/${REPOSITORY_NAME}.git" \
+git \
+    -c credential.helper= \
+    -c "credential.helper=store --file=${GIT_CREDENTIAL_FILE}" \
+    -C "${WORKTREE}" \
+    push \
+    "http://127.0.0.1:${LOCAL_PORT}/${GITEA_USERNAME}/${REPOSITORY_NAME}.git" \
     "HEAD:${TRACKING_REF}"
 
 echo "repository-url=${GITEA_INTERNAL_REPOSITORY_URL}" >> "${GITHUB_OUTPUT}"
