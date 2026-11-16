@@ -30,7 +30,6 @@ juju deploy \
     --channel="${GIT_INTEGRATOR_CHANNEL}" \
     --model="${JUJU_MODEL}"
 
-
 echo "=== Waiting for application registration ==="
 
 juju wait-for application "${APP_NAME}" \
@@ -39,7 +38,11 @@ juju wait-for application "${APP_NAME}" \
     --timeout=2m
 
 echo "=== Creating Juju secret ==="
-SECRET_FILE="$(mktemp)"
+
+JUJU_SNAP_COMMON="${HOME}/snap/juju/common"
+mkdir -p "${JUJU_SNAP_COMMON}"
+
+SECRET_FILE="$(mktemp "${JUJU_SNAP_COMMON}/secret.XXXXXX")"
 chmod 600 "${SECRET_FILE}"
 
 printf 'credentials-personal-access-token: %s\n' \
@@ -54,7 +57,7 @@ SECRET_URI="$(
 )"
 
 if [[ -z "${SECRET_URI}" ]]; then
-    echo "::error::Failed to create Juju secret."
+    echo "::error::Failed to extract secret URI from Juju output."
     exit 1
 fi
 
