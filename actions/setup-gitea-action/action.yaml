@@ -41,6 +41,11 @@ inputs:
     required: false
     default: "gitea-action"
 
+  git-integrator-application-name:
+    description: "Name of the Juju application used for git-integrator"
+    required: false
+    default: "gitea-action-git-integrator"
+
 outputs:
   repository-url:
     description: "Cluster-internal URL of the repository used by git-integrator."
@@ -112,5 +117,6 @@ runs:
         REPOSITORY_PATH: ${{ inputs.path }}
         GITEA_USERNAME: ${{ steps.gitea.outputs.gitea-username }}
         GITEA_TOKEN: ${{ steps.gitea.outputs.gitea-token }}
+        GIT_INTEGRATOR_APP_NAME: ${{ inputs.git-integrator-application-name }}
       run: bash "${{ github.action_path }}/scripts/deploy-git-integrator.sh"
 

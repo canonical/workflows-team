@@ -27,7 +27,7 @@ spec:
               value: "1000"
             - name: USER_GID
               value: "1000"
-            - name: INSTALL_LOCK
+            - name: GITEA__security__INSTALL_LOCK
               value: "true"
             - name: GITEA__database__DB_TYPE
               value: "sqlite3"
