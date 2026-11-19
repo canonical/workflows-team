@@ -97,7 +97,7 @@ jobs:
 
           sudo snap install concierge --classic
 
-          sudo -E concierge prepare -p k8s --extra-snaps="terraform,just"
+          sudo -E concierge prepare -p k8s --extra-snaps="${{ inputs.extra-snaps }}"
 
           # FIXME: Install via goss snap whenever available
           
@@ -109,9 +109,6 @@ jobs:
           chmod +rx /usr/local/bin/kgoss
           curl -fL "${goss_base_url}/dgoss" -o /usr/local/bin/dgoss
           chmod +rx /usr/local/bin/dgoss
-
-        env:
-          CONCIERGE_EXTRA_SNAPS: ${{ inputs.extra-snaps }}
 
       - name: Install docker if required (after k8s bootstrapped)
         if: ${{ inputs.install-docker }}
