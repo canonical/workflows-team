@@ -28,7 +28,7 @@ jobs:
         strategy:
           fail-fast: false
           matrix:
-            product: ${{ (github.event_name == 'schedule' || inputs.product == 'all') && fromJSON('["temporal", "airflow", "nifi"]') || fromJSON(format('["{0}"]', inputs.product)) }}
+            product: ${{ (github.event_name == 'schedule' || inputs.product == 'all' || inputs.product == '') && fromJSON('["temporal", "airflow", "nifi"]') || fromJSON(format('["{0}"]', inputs.product)) }}
 
         name: SSDLC scanning - all clients - ${{ matrix.product }} artifacts
         steps:

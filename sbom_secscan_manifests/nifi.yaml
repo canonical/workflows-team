@@ -7,6 +7,10 @@
 # `ssdlc_params` are the SEC0025 identification parameters; with them, results
 # go to the long-term SSDLC scan registry. `version` is the product track and
 # `cycle` defaults to the upcoming Ubuntu release (the cycle being scanned).
+#
+# Shared values live in the `.<product>_defaults` anchor and are merged into each
+# artifact with `<<:`. The merge is shallow: an artifact that overrides
+# `ssdlc_params` must redefine the whole mapping.
 
 clients:
   sbom:
@@ -15,25 +19,23 @@ clients:
     team: analytics
   secscan: {}
 
+.nifi_defaults: &nifi_defaults
+  channel: 2.10/edge
+  base: ubuntu@26.04
+  ssdlc_params:
+    name: Charmed NiFi
+    version: "2.10"
+    channel: edge
+
 artifacts:
   # charms
-  - name: nifi-k8s
+  - <<: *nifi_defaults
+    name: nifi-k8s
     type: charm
-    channel: 2.10/edge
-    base: ubuntu@26.04
-    ssdlc_params:
-      name: Charmed NiFi
-      version: "2.10"
-      channel: edge
 
   # rocks
-  - name: nifi-rock
+  - <<: *nifi_defaults
+    name: nifi-rock
     type: rock
     charm: nifi-k8s
     charm_resource: nifi-image
-    channel: 2.10/edge
-    base: ubuntu@26.04
-    ssdlc_params:
-      name: Charmed NiFi
-      version: "2.10"
-      channel: edge

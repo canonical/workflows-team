@@ -7,6 +7,10 @@
 # `ssdlc_params` are the SEC0025 identification parameters; with them, results
 # go to the long-term SSDLC scan registry. `version` is the product track and
 # `cycle` defaults to the upcoming Ubuntu release (the cycle being scanned).
+#
+# Shared values live in the `.<product>_defaults` anchor and are merged into each
+# artifact with `<<:`. The merge is shallow: an artifact that overrides
+# `ssdlc_params` must redefine the whole mapping.
 
 clients:
   sbom:
@@ -15,28 +19,27 @@ clients:
     team: analytics
   secscan: {}
 
+.temporal_defaults: &temporal_defaults
+  channel: 1.31/stable
+  base: ubuntu@26.04
+  ssdlc_params:
+    name: Charmed Temporal
+    version: "1.31"
+    channel: stable
+
 artifacts:
   # charms
-  - name: temporal-k8s
+  - <<: *temporal_defaults
+    name: temporal-k8s
     type: charm
-    channel: 1.31/stable
-    base: ubuntu@26.04
-    ssdlc_params:
-      name: Charmed Temporal
-      version: "1.31"
-      channel: stable
 
-  - name: temporal-ui-k8s
+  - <<: *temporal_defaults
+    name: temporal-ui-k8s
     type: charm
-    channel: 1.31/stable
-    base: ubuntu@26.04
-    ssdlc_params:
-      name: Charmed Temporal
-      version: "1.31"
-      channel: stable
 
   # the worker charm has its own track, independent of the server version
-  - name: temporal-worker-k8s
+  - <<: *temporal_defaults
+    name: temporal-worker-k8s
     type: charm
     channel: 2.0/stable
     base: ubuntu@24.04
@@ -45,35 +48,20 @@ artifacts:
       version: "2.0"
       channel: stable
 
-  - name: temporal-admin-k8s
+  - <<: *temporal_defaults
+    name: temporal-admin-k8s
     type: charm
-    channel: 1.31/stable
-    base: ubuntu@26.04
-    ssdlc_params:
-      name: Charmed Temporal
-      version: "1.31"
-      channel: stable
 
   # rocks
   # ubuntu/temporal-server; also used by temporal-admin-k8s
-  - name: temporal-server-rock
+  - <<: *temporal_defaults
+    name: temporal-server-rock
     type: rock
     charm: temporal-k8s
     charm_resource: temporal-server-image
-    channel: 1.31/stable
-    base: ubuntu@26.04
-    ssdlc_params:
-      name: Charmed Temporal
-      version: "1.31"
-      channel: stable
 
-  - name: temporal-ui-rock
+  - <<: *temporal_defaults
+    name: temporal-ui-rock
     type: rock
     charm: temporal-ui-k8s
     charm_resource: temporal-ui-image
-    channel: 1.31/stable
-    base: ubuntu@26.04
-    ssdlc_params:
-      name: Charmed Temporal
-      version: "1.31"
-      channel: stable
