@@ -1,0 +1,62 @@
+# run secscan using the sbomber tool on all airflow charms and rocks
+# this manifest is used in `.github/workflows/sbom_secscan.yaml`
+#
+# Every artifact defines `type`, `channel` and `base`. Rocks are pulled from the
+# OCI resource of a charm at that channel, so we scan the image actually shipped.
+#
+# `ssdlc_params` are the SEC0025 identification parameters; with them, results
+# go to the long-term SSDLC scan registry. `version` is the product track and
+# `cycle` defaults to the upcoming Ubuntu release (the cycle being scanned).
+#
+# Shared values live in the `.<product>_defaults` anchor and are merged into each
+# artifact with `<<:`. The merge is shallow: an artifact that overrides
+# `ssdlc_params` must redefine the whole mapping.
+
+clients:
+  sbom:
+    department: charm_engineering
+    email: workflows-charmers@canonical.com
+    team: analytics
+  secscan: {}
+
+.airflow_defaults: &airflow_defaults
+  channel: 3.1/edge
+  base: ubuntu@24.04
+  ssdlc_params:
+    name: Charmed Airflow
+    version: "3.1"
+    channel: edge
+
+artifacts:
+  # charms
+  - <<: *airflow_defaults
+    name: airflow-coordinator-k8s
+    type: charm
+
+  - <<: *airflow_defaults
+    name: airflow-api-server-k8s
+    type: charm
+
+  - <<: *airflow_defaults
+    name: airflow-scheduler-k8s
+    type: charm
+
+  - <<: *airflow_defaults
+    name: airflow-dag-processor-k8s
+    type: charm
+
+  - <<: *airflow_defaults
+    name: airflow-triggerer-k8s
+    type: charm
+
+  - <<: *airflow_defaults
+    name: airflow-kubernetes-executor-k8s
+    type: charm
+
+  # rocks
+  # ubuntu/airflow; shared by the coordinator and all core charms
+  - <<: *airflow_defaults
+    name: airflow-rock
+    type: rock
+    charm: airflow-api-server-k8s
+    charm_resource: airflow-api-server-image
